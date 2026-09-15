@@ -1,0 +1,10 @@
+{
+  "extName": {
+    "message": "YouTube Translate & Speak (AI Pro)",
+    "description": "Extension name"
+  },
+  "extDesc": {
+    "message": "YouTube bilingual subtitles and speech: AI batch pre-translation, sentence re-translation, font sizing, and local caching.",
+    "description": "Extension description"
+  }
+}

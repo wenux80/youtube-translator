@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>YouTube Translate & Speak</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <!-- Header -->
+    <header class="header">
+      <div class="logo">
+        <span class="logo-icon">🎬</span>
+        <span class="logo-text">YouTube 翻译与配音</span>
+      </div>
+      <label class="switch" title="开启/关闭插件">
+        <input type="checkbox" id="enabled-toggle">
+        <span class="slider"></span>
+      </label>
+    </header>
+
+    <!-- Main Settings -->
+    <div class="card">
+      <div class="form-row">
+        <label for="target-lang">目标语言</label>
+        <select id="target-lang" class="input-select"></select>
+      </div>
+
+      <div class="form-row">
+        <label for="engine-select">翻译引擎</label>
+        <select id="engine-select" class="input-select">
+          <option value="google">Google 翻译 (免Key)</option>
+          <option value="deepseek">DeepSeek AI</option>
+          <option value="openai">OpenAI (ChatGPT)</option>
+          <option value="gemini">Google Gemini</option>
+          <option value="ollama">Ollama (本地模型)</option>
+          <option value="custom">自定义 API</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Optimization #1: Batch Pre-translate Setting -->
+    <div class="card">
+      <div class="card-title">⚡ AI 预处理设置 (分批翻译)</div>
+      <div class="form-row">
+        <label for="batch-size" title="单次向 AI 发送翻译的字幕条数，避免一次性全量消耗">预处理条数</label>
+        <div class="input-number-wrapper">
+          <input type="number" id="batch-size" min="1" max="50" value="10" class="input-num">
+          <span class="unit">条/批</span>
+        </div>
+      </div>
+      <div class="form-check-row">
+        <label class="check-label">
+          <input type="checkbox" id="auto-pretranslate"> 随视频播放自动预翻译后续字幕
+        </label>
+      </div>
+    </div>
+
+    <!-- Optimization #3: Font Size Adjuster -->
+    <div class="card">
+      <div class="card-title">🔤 字号与显示样式</div>
+      <div class="form-row">
+        <label for="trans-font-size">译文字号 (<span id="trans-font-val">24</span>px)</label>
+        <input type="range" id="trans-font-size" min="14" max="48" value="24" class="range-slider">
+      </div>
+      <div class="form-row">
+        <label for="orig-font-size">原文字号 (<span id="orig-font-val">16</span>px)</label>
+        <input type="range" id="orig-font-size" min="10" max="36" value="16" class="range-slider">
+      </div>
+      <div class="form-row" style="align-items: center; justify-content: space-between;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <label for="orig-font-color" style="margin: 0; font-size: 13px;">原文颜色</label>
+          <input type="color" id="orig-font-color" value="#d1d5db" class="input-color">
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <label for="trans-font-color" style="margin: 0; font-size: 13px;">译文颜色</label>
+          <input type="color" id="trans-font-color" value="#ffffff" class="input-color">
+        </div>
+      </div>
+      <div class="form-check-row">
+        <label class="check-label">
+          <input type="checkbox" id="show-orig"> 显示原文
+        </label>
+        <label class="check-label">
+          <input type="checkbox" id="show-trans"> 显示译文
+        </label>
+      </div>
+    </div>
+
+    <!-- Optimization #4: Local Cache -->
+    <div class="card">
+      <div class="card-title">💾 本地持久化缓存</div>
+      <div class="form-check-row">
+        <label class="check-label">
+          <input type="checkbox" id="use-cache"> 优先使用本地缓存 (0 Token 极速加载)
+        </label>
+      </div>
+    </div>
+
+    <!-- Voice TTS -->
+    <div class="card">
+      <div class="card-title">🔊 语音朗读与配音</div>
+      <div class="form-check-row">
+        <label class="check-label">
+          <input type="checkbox" id="tts-enabled"> 随播放自动朗读当前译文
+        </label>
+      </div>
+      <div class="form-row">
+        <label for="tts-rate">语速 (<span id="tts-rate-val">1.0</span>x)</label>
+        <input type="range" id="tts-rate" min="0.5" max="2.0" step="0.1" value="1.0" class="range-slider">
+      </div>
+      <div class="form-check-row">
+        <label class="check-label">
+          <input type="checkbox" id="audio-ducking"> 原片声音避让 (朗读时自动调低原声)
+        </label>
+      </div>
+    </div>
+
+    <!-- Footer links -->
+    <footer class="footer" style="display: flex; gap: 8px;">
+      <button id="open-options-btn" class="footer-btn" style="flex: 1;">⚙️ 详细配置</button>
+      <button id="open-cache-btn" class="footer-btn" style="flex: 1;">💾 缓存管理</button>
+    </footer>
+  </div>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

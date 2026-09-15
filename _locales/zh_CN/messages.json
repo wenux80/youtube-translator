@@ -1,0 +1,10 @@
+{
+  "extName": {
+    "message": "YouTube 翻译与配音 (AI 优化版)",
+    "description": "Extension name"
+  },
+  "extDesc": {
+    "message": "YouTube 双语字幕翻译与智能配音：支持AI预处理分批翻译、单句重译、字号缩放及本地缓存优先加速。",
+    "description": "Extension description"
+  }
+}

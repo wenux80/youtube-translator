@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>YouTube 翻译与配音 - 设置与缓存管理</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="options-container">
+    <header class="header">
+      <div class="logo">
+        <span class="logo-icon">🎬</span>
+        <h1>YouTube 翻译与配音 设置中心</h1>
+      </div>
+      <div class="header-actions">
+        <button id="save-btn" class="btn btn-primary">💾 保存设置</button>
+      </div>
+    </header>
+
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="ai-models">🤖 AI 模型与 API 配置</button>
+      <button class="tab-btn" data-tab="optimizations">⚡ 优化功能配置</button>
+      <button class="tab-btn" data-tab="appearance">🎨 字幕样式与预览</button>
+      <button class="tab-btn" data-tab="cache-manager">💾 本地缓存管理</button>
+    </div>
+
+    <!-- Tab 1: AI Models -->
+    <div class="tab-content active" id="tab-ai-models">
+      <div class="card">
+        <h2 class="card-title">DeepSeek 官方 / 兼容 API 配置</h2>
+        <div class="form-group">
+          <label>API Key</label>
+          <input type="password" id="deepseek-key" class="input-text" placeholder="sk-...">
+        </div>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label>API 基础地址 (Base URL)</label>
+            <input type="text" id="deepseek-url" class="input-text" value="https://api.deepseek.com/v1">
+          </div>
+          <div class="form-group flex-1">
+            <label>模型名称 (Model)</label>
+            <input type="text" id="deepseek-model" class="input-text" value="deepseek-chat">
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">OpenAI (ChatGPT) 配置</h2>
+        <div class="form-group">
+          <label>API Key</label>
+          <input type="password" id="openai-key" class="input-text" placeholder="sk-...">
+        </div>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label>API 基础地址 (Base URL)</label>
+            <input type="text" id="openai-url" class="input-text" value="https://api.openai.com/v1">
+          </div>
+          <div class="form-group flex-1">
+            <label>模型名称 (Model)</label>
+            <input type="text" id="openai-model" class="input-text" value="gpt-4o-mini">
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">Google Gemini 配置</h2>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label>Gemini API Key</label>
+            <input type="password" id="gemini-key" class="input-text" placeholder="AIzaSy...">
+          </div>
+          <div class="form-group flex-1">
+            <label>模型名称</label>
+            <input type="text" id="gemini-model" class="input-text" value="gemini-1.5-flash">
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">Ollama 本地大模型</h2>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label>Ollama 地址</label>
+            <input type="text" id="ollama-url" class="input-text" value="http://localhost:11434">
+          </div>
+          <div class="form-group flex-1">
+            <label>模型名称</label>
+            <input type="text" id="ollama-model" class="input-text" value="llama3.2">
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">自定义 OpenAI 兼容接口 (如 SiliconFlow, Groq, OneAPI 等)</h2>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label>Base URL</label>
+            <input type="text" id="custom-url" class="input-text" placeholder="https://api.siliconflow.cn/v1">
+          </div>
+          <div class="form-group flex-1">
+            <label>Model</label>
+            <input type="text" id="custom-model" class="input-text" placeholder="Qwen/Qwen2.5-7B-Instruct">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>API Key</label>
+          <input type="password" id="custom-key" class="input-text" placeholder="sk-...">
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">AI 字幕翻译 System Prompt (系统提示词)</h2>
+        <div class="form-group">
+          <textarea id="system-prompt" class="input-textarea" rows="3"></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 2: Optimizations -->
+    <div class="tab-content" id="tab-optimizations">
+      <div class="card">
+        <h2 class="card-title">优化项 1: AI 翻译分批预处理 (避免全量消耗 Token)</h2>
+        <p class="desc-text">
+          在播放视频时，插件不会一次性将整部视频（数千句）送给 AI 翻译，而是基于视频播放进度，按设定的批次滑动窗口提前预翻译接下来的字幕。
+        </p>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label>单次预翻译批次大小 (Batch Size)</label>
+            <input type="number" id="opt-batch-size" class="input-text" min="1" max="50" value="10">
+            <span class="hint">默认 10 句话一批，既保证播放连贯又防止速率超限 (429 报错)。</span>
+          </div>
+          <div class="form-group flex-1">
+            <label>低缓冲预加载阈值 (Buffer Threshold)</label>
+            <input type="number" id="opt-buffer-threshold" class="input-text" min="1" max="50" value="10">
+            <span class="hint">当当前播放位置前方已翻译字幕少于此条数时（默认 10 条），自动触发下一批预翻译。</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="check-label">
+            <input type="checkbox" id="opt-auto-pretranslate"> 随视频播放自动滑动预处理
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">优化项 2: 单句重新翻译 (Re-translate Single Sentence)</h2>
+        <p class="desc-text">
+          在播放器悬浮字幕框（鼠标悬停）或右侧字幕侧边栏中，每一句话都有 <strong>[🔄 重译]</strong> 按钮。
+          点击后，插件会将该句子结合上下文发送给所选引擎重新翻译，并实时更新播放界面与本地缓存。
+        </p>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">优化项 4: 本地优先持久化缓存 (0 Token 极速加载)</h2>
+        <div class="form-group">
+          <label class="check-label">
+            <input type="checkbox" id="opt-use-cache"> 开启本地持久化缓存 (基于 IndexedDB)
+          </label>
+          <span class="hint">再次观看同一视频或快进回看时，直接读取已翻译内容，0ms 延迟且不重复消耗任何 API 额度。</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 3: Appearance & Font Size -->
+    <div class="tab-content" id="tab-appearance">
+      <div class="card">
+        <h2 class="card-title">优化项 3: 字号调整与样式定制</h2>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label>译文字体大小: <span id="lbl-trans-size">24</span>px</label>
+            <input type="range" id="opt-trans-size" min="14" max="50" value="24" class="range-slider">
+          </div>
+          <div class="form-group flex-1">
+            <label>原文字体大小: <span id="lbl-orig-size">16</span>px</label>
+            <input type="range" id="opt-orig-size" min="10" max="36" value="16" class="range-slider">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label>译文字体颜色</label>
+            <input type="color" id="opt-font-color" value="#ffffff">
+          </div>
+          <div class="form-group flex-1">
+            <label>原文字体颜色</label>
+            <input type="color" id="opt-orig-font-color" value="#d1d5db">
+          </div>
+          <div class="form-group flex-1">
+            <label>背景颜色与透明度</label>
+            <input type="text" id="opt-bg-color" class="input-text" value="rgba(0, 0, 0, 0.75)">
+          </div>
+        </div>
+
+        <div class="preview-section">
+          <label>实时效果预览：</label>
+          <div class="preview-stage">
+            <div class="preview-box" id="preview-box">
+              <div class="preview-orig" id="preview-orig">This is the original English subtitle line.</div>
+              <div class="preview-trans" id="preview-trans">这是翻译后的中文字幕效果展示。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 4: Cache Manager -->
+    <div class="tab-content" id="tab-cache-manager">
+      <div class="card">
+        <div class="flex-between">
+          <div>
+            <h2 class="card-title">已缓存视频字幕记录</h2>
+            <p class="desc-text">所有翻译过的视频字幕均安全保存在您的本地浏览器中。</p>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button id="refresh-cache-btn" class="btn btn-secondary">🔄 刷新列表</button>
+            <button id="clear-all-cache-btn" class="btn btn-danger">🗑️ 清空所有本地缓存</button>
+          </div>
+        </div>
+
+        <div class="table-container">
+          <table class="cache-table">
+            <thead>
+              <tr>
+                <th>视频标题 / ID</th>
+                <th>目标语言</th>
+                <th>翻译引擎</th>
+                <th>翻译条数</th>
+                <th>缓存更新时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="cache-list-body">
+              <tr>
+                <td colspan="6" style="text-align: center; color: #94a3b8; padding: 20px;">
+                  正在加载缓存记录...
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>
