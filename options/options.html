@@ -174,6 +174,10 @@
             <label>原文字体大小: <span id="lbl-orig-size">16</span>px</label>
             <input type="range" id="opt-orig-size" min="10" max="36" value="16" class="range-slider">
           </div>
+          <div class="form-group flex-1">
+            <label>字幕框宽度: <span id="lbl-sub-width">自适应</span> <button type="button" id="opt-sub-width-auto-btn" class="btn btn-sm btn-secondary" style="margin-left:6px;">恢复自适应</button></label>
+            <input type="range" id="opt-sub-width" min="25" max="96" value="85" class="range-slider">
+          </div>
         </div>
 
         <div class="form-row">
@@ -206,37 +210,35 @@
     <!-- Tab 4: Cache Manager -->
     <div class="tab-content" id="tab-cache-manager">
       <div class="card">
-        <div class="flex-between">
+        <div class="flex-between cache-header-row">
           <div>
-            <h2 class="card-title">已缓存视频字幕记录</h2>
-            <p class="desc-text">所有翻译过的视频字幕均安全保存在您的本地浏览器中。</p>
+            <h2 class="card-title">已缓存视频字幕记录（按频道分组）</h2>
+            <p class="desc-text">所有翻译与原版字幕均按 YouTube 频道归类保存在本地浏览器中，支持批量勾选删除。</p>
           </div>
-          <div style="display: flex; gap: 8px;">
+          <div class="cache-header-actions">
+            <button id="resolve-channels-btn" class="btn btn-secondary" style="display: none;">🏷️ 识别未知频道</button>
             <button id="refresh-cache-btn" class="btn btn-secondary">🔄 刷新列表</button>
-            <button id="clear-all-cache-btn" class="btn btn-danger">🗑️ 清空所有本地缓存</button>
+            <button id="clear-all-cache-btn" class="btn btn-danger">🗑️ 清空所有缓存</button>
           </div>
         </div>
 
-        <div class="table-container">
-          <table class="cache-table">
-            <thead>
-              <tr>
-                <th>视频标题 / ID</th>
-                <th>目标语言</th>
-                <th>翻译引擎</th>
-                <th>翻译条数</th>
-                <th>缓存更新时间</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody id="cache-list-body">
-              <tr>
-                <td colspan="6" style="text-align: center; color: #94a3b8; padding: 20px;">
-                  正在加载缓存记录...
-                </td>
-              </tr>
-            </tbody>
-          </table>
+        <div class="cache-toolbar">
+          <div class="cache-toolbar-left">
+            <label class="check-label cache-select-all-label">
+              <input type="checkbox" id="select-all-cache">
+              <span>全选当前</span>
+            </label>
+            <span id="selected-count-label" class="selected-count-pill">已选 0 条</span>
+            <button id="batch-delete-cache-btn" class="btn btn-sm btn-danger" disabled>🗑️ 批量删除选中</button>
+            <button id="toggle-all-groups-btn" class="btn btn-sm btn-secondary">📂 全部折叠</button>
+          </div>
+          <div class="cache-toolbar-right">
+            <input type="text" id="cache-search-input" class="input-text cache-search-input" placeholder="🔍 搜索频道名 / 视频标题 / ID...">
+          </div>
+        </div>
+
+        <div id="cache-groups-container" class="cache-groups-container">
+          <div class="cache-empty-state">正在加载缓存记录...</div>
         </div>
       </div>
     </div>

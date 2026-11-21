@@ -128,7 +128,7 @@
   let pollTimer = null;
   let pollCount = 0;
 
-  function dispatchTracks(videoId, videoTitle, tracks) {
+  function dispatchTracks(videoId, meta, tracks) {
     if (!tracks || tracks.length === 0) return;
     lastDispatchedVideoId = videoId;
     console.log(`[YouTube Translator] Extracted ${tracks.length} caption tracks for ${videoId}`);
@@ -137,10 +137,35 @@
       type: 'CAPTION_TRACKS_FOUND',
       payload: {
         videoId,
-        title: videoTitle,
+        title: meta.title || '',
+        channelName: meta.channelName || '',
+        channelId: meta.channelId || '',
         tracks
       }
     }, '*');
+  }
+
+  function extractVideoMeta(videoId) {
+    const player = getPlayer();
+    let title = document.title.replace(' - YouTube', '');
+    let channelName = '';
+    let channelId = '';
+
+    const readFromResp = (resp) => {
+      if (!resp || resp.videoDetails?.videoId !== videoId) return;
+      if (resp.videoDetails?.title) title = resp.videoDetails.title;
+      if (resp.videoDetails?.author && !channelName) channelName = resp.videoDetails.author;
+      if (resp.videoDetails?.channelId && !channelId) channelId = resp.videoDetails.channelId;
+      const micro = resp.microformat?.playerMicroformatRenderer;
+      if (micro?.ownerChannelName && !channelName) channelName = micro.ownerChannelName;
+      if (micro?.externalChannelId && !channelId) channelId = micro.externalChannelId;
+    };
+
+    try { readFromResp(player?.getPlayerResponse?.()); } catch (e) {}
+    try { readFromResp(window.ytInitialPlayerResponse); } catch (e) {}
+    try { readFromResp(document.querySelector('ytd-watch-flexy')?.playerData); } catch (e) {}
+
+    return { title, channelName, channelId };
   }
 
   function pollCaptionTracks(force = false) {
@@ -160,18 +185,32 @@
 
     if (tracks && tracks.length > 0) {
       clearTimeout(pollTimer);
-      const player = getPlayer();
-      let videoTitle = document.title.replace(' - YouTube', '');
-      try {
-        const resp = player?.getPlayerResponse?.();
-        if (resp?.videoDetails?.title) videoTitle = resp.videoDetails.title;
-      } catch (e) {}
-      dispatchTracks(currentV, videoTitle, tracks);
+      const meta = extractVideoMeta(currentV);
+      dispatchTracks(currentV, meta, tracks);
       return;
     }
 
     if (pollCount < 25) {
       pollTimer = setTimeout(() => pollCaptionTracks(false), 400);
+    }
+  }
+
+  let pendingRestoreNativeCcOff = false;
+  let restoreCcTimer = null;
+
+  function maybeRestoreNativeCc() {
+    if (!pendingRestoreNativeCcOff) return;
+    pendingRestoreNativeCcOff = false;
+    clearTimeout(restoreCcTimer);
+    const ccBtn = document.querySelector('.ytp-subtitles-button');
+    const isPressed = ccBtn?.getAttribute('aria-pressed') === 'true';
+    if (isPressed) {
+      const player = getPlayer();
+      if (player && typeof player.toggleSubtitles === 'function') {
+        player.toggleSubtitles();
+      } else if (ccBtn) {
+        ccBtn.click();
+      }
     }
   }
 
@@ -187,6 +226,7 @@
               type: 'TIMEDTEXT_DATA_CAPTURED',
               payload: { url, rawText: this.responseText }
             }, '*');
+            maybeRestoreNativeCc();
           }
         } catch (e) {}
       });
@@ -214,6 +254,7 @@
               type: 'TIMEDTEXT_DATA_CAPTURED',
               payload: { url, rawText }
             }, '*');
+            maybeRestoreNativeCc();
           }
         }).catch(() => {});
       } catch (e) {}
@@ -263,6 +304,44 @@
         } else if (ccBtn) {
           ccBtn.click();
         }
+      } else if (event.data.type === 'TRIGGER_PLAYER_TIMEDTEXT') {
+        const player = getPlayer();
+        if (!player) return;
+        const desiredLang = event.data.payload?.languageCode || 'en';
+        const ccBtn = document.querySelector('.ytp-subtitles-button');
+        const wasPressed = ccBtn?.getAttribute('aria-pressed') === 'true';
+
+        try {
+          if (typeof player.loadModule === 'function') {
+            player.loadModule('captions');
+          }
+          const tracklist = player.getOption?.('captions', 'tracklist') || [];
+          const targetTrack = tracklist.find(t => t.languageCode === desiredLang)
+            || tracklist.find(t => t.languageCode?.startsWith(desiredLang.split('-')[0]))
+            || tracklist[0];
+
+          if (targetTrack && typeof player.setOption === 'function') {
+            player.setOption('captions', 'track', targetTrack);
+          }
+
+          if (!wasPressed) {
+            pendingRestoreNativeCcOff = true;
+            clearTimeout(restoreCcTimer);
+            // If setOption didn't fire timedtext on its own (CC still off), briefly toggle CC so YouTube attaches POT token
+            setTimeout(() => {
+              if (!pendingRestoreNativeCcOff) return;
+              const stillOff = ccBtn?.getAttribute('aria-pressed') !== 'true';
+              if (stillOff) {
+                if (typeof player.toggleSubtitles === 'function') {
+                  player.toggleSubtitles();
+                } else if (ccBtn) {
+                  ccBtn.click();
+                }
+              }
+              restoreCcTimer = setTimeout(maybeRestoreNativeCc, 2000);
+            }, 350);
+          }
+        } catch (e) {}
       }
     }
   });

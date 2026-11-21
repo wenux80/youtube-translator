@@ -3,6 +3,7 @@
 :root {
   --yt-trans-orig-size: 16px;
   --yt-trans-trans-size: 24px;
+  --yt-trans-max-width: 85%;
   --yt-trans-font-color: #ffffff;
   --yt-trans-orig-color: #d1d5db;
   --yt-trans-bg-color: rgba(0, 0, 0, 0.75);
@@ -14,11 +15,16 @@
   left: 50%;
   bottom: 68px; /* Above YouTube controls bar in standard non-fullscreen view */
   transform: translateX(-50%);
-  z-index: 99999 !important; /* Always in front of all player controls and overlays */
+  z-index: 2147483641 !important; /* Always in front of all player controls, cards, ads, and overlays */
   pointer-events: none; /* Allow video clicks around the subtitle */
-  max-width: 85%;
+  max-width: var(--yt-trans-max-width, 85%);
   text-align: center;
   transition: bottom 0.2s ease;
+}
+
+#yt-translator-overlay-container.fixed-width,
+#yt-translator-overlay-container.resizing-width {
+  width: var(--yt-trans-max-width, 85%);
 }
 
 /* Responsive bottom offsets for default position */
@@ -37,7 +43,9 @@
 /* The subtitle box itself */
 .yt-trans-box {
   display: inline-block;
-  padding: 8px 16px;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 8px 18px;
   background-color: var(--yt-trans-bg-color);
   border-radius: 8px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
@@ -47,6 +55,59 @@
   cursor: move;
   text-align: center;
   transition: background-color 0.2s ease, transform 0.15s ease;
+}
+
+#yt-translator-overlay-container.fixed-width .yt-trans-box,
+#yt-translator-overlay-container.resizing-width .yt-trans-box {
+  width: 100%;
+}
+
+#yt-translator-overlay-container.resizing-width .yt-trans-box {
+  outline: 1.5px dashed rgba(56, 189, 248, 0.85);
+}
+
+/* Left & right edge width resize handles */
+.yt-trans-resize-handle {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  width: 12px;
+  cursor: ew-resize;
+  z-index: 2147483642;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.yt-trans-resize-left {
+  left: -4px;
+}
+
+.yt-trans-resize-right {
+  right: -4px;
+}
+
+.yt-trans-resize-handle::after {
+  content: '';
+  width: 3px;
+  height: 55%;
+  min-height: 16px;
+  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.75);
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.yt-trans-box:hover .yt-trans-resize-handle,
+#yt-translator-overlay-container.resizing-width .yt-trans-resize-handle {
+  opacity: 1;
+}
+
+.yt-trans-resize-handle:hover::after,
+#yt-translator-overlay-container.resizing-width .yt-trans-resize-handle::after {
+  background: #38bdf8;
+  transform: scaleX(1.3);
 }
 
 .yt-trans-box:hover {
@@ -106,7 +167,12 @@
   gap: 6px;
   align-items: center;
   box-shadow: 0 2px 8px rgba(0,0,0,0.4);
-  z-index: 70;
+  z-index: 2147483642;
+}
+
+.yt-trans-box.near-top .yt-trans-hover-actions {
+  top: auto;
+  bottom: -36px;
 }
 
 .yt-trans-box:hover .yt-trans-hover-actions {
@@ -156,7 +222,7 @@
   cursor: pointer;
   box-shadow: 0 2px 6px rgba(0,0,0,0.5);
   transition: all 0.15s ease;
-  z-index: 75;
+  z-index: 2147483642;
 }
 
 .yt-trans-box:hover .yt-trans-corner-close {
@@ -173,25 +239,47 @@
 /* Floating Player Control Bar */
 #yt-translator-floating-bar {
   position: absolute;
-  top: 16px;
+  top: 14px;
   right: 16px;
-  z-index: 55;
-  background: rgba(18, 18, 24, 0.85);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  z-index: 2147483640 !important; /* Stay above YouTube .ytp-chrome-top, info cards, watermarks & ads */
+  pointer-events: auto !important;
+  transform: translateZ(0);
+  background: rgba(18, 18, 24, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 24px;
   padding: 4px 10px;
   display: flex;
   align-items: center;
   gap: 8px;
   backdrop-filter: blur(8px);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-  opacity: 0.85;
-  transition: opacity 0.25s ease, transform 0.2s ease;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  opacity: 0.9;
+  transition: opacity 0.25s ease;
   user-select: none;
 }
 
 #yt-translator-floating-bar:hover {
   opacity: 1;
+}
+
+.yt-bar-drag-handle {
+  cursor: grab;
+  color: #94a3b8;
+  font-size: 12px;
+  padding: 2px 4px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 6px;
+}
+
+.yt-bar-drag-handle:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.yt-bar-drag-handle:active {
+  cursor: grabbing;
 }
 
 /* Bar buttons and selectors */
@@ -273,7 +361,7 @@
   font-size: 12px;
   box-shadow: 0 4px 12px rgba(0,0,0,0.5);
   border-left: 3px solid #38bdf8;
-  z-index: 65;
+  z-index: 2147483643 !important;
   animation: ytFadeIn 0.2s ease, ytFadeOut 0.3s ease 2.7s forwards;
   pointer-events: none;
 }

@@ -8,6 +8,8 @@ import {
   updateSingleTranslation,
   getAllCachedRecords,
   deleteCache,
+  deleteCacheBatch,
+  updateVideoChannelMeta,
   clearAllCache,
   saveOriginalSubtitleRecord,
   getOriginalSubtitleRecord,
@@ -29,7 +31,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     translateBatch(items, targetLang, engine, settings)
       .then(results => sendResponse({ success: true, data: results }))
       .catch(err => {
-        console.error('[Background] Batch translation error:', err);
+        console.warn('[Background] Batch translation failed:', err.message || err);
         sendResponse({ success: false, error: err.message });
       });
     return true; // Keep channel open for async response
@@ -40,7 +42,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     retranslateSingleSentence(item, prevText, nextText, targetLang, engine, settings)
       .then(translation => sendResponse({ success: true, translation }))
       .catch(err => {
-        console.error('[Background] Single re-translation error:', err);
+        console.warn('[Background] Single re-translation failed:', err.message || err);
         sendResponse({ success: false, error: err.message });
       });
     return true;
@@ -92,8 +94,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (type === 'DB_SAVE_ORIGINAL') {
-    const { videoId, videoTitle, items, languageCode } = payload;
-    saveOriginalSubtitleRecord(videoId, videoTitle, items, languageCode)
+    const { videoId, videoTitle, items, languageCode, channelName, channelId } = payload;
+    saveOriginalSubtitleRecord(videoId, videoTitle, items, languageCode, channelName, channelId)
       .then(data => sendResponse({ success: true, data }))
       .catch(err => sendResponse({ success: false, error: err.message }));
     return true;
@@ -125,6 +127,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (type === 'DB_DELETE') {
     const { videoId, targetLang, engine } = payload;
     deleteCache(videoId, targetLang, engine)
+      .then(data => sendResponse({ success: true, data }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (type === 'DB_DELETE_BATCH') {
+    const { keys } = payload;
+    deleteCacheBatch(keys)
+      .then(data => sendResponse({ success: true, data }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (type === 'DB_UPDATE_CHANNEL_META') {
+    const { videoId, channelName, channelId } = payload;
+    updateVideoChannelMeta(videoId, channelName, channelId)
       .then(data => sendResponse({ success: true, data }))
       .catch(err => sendResponse({ success: false, error: err.message }));
     return true;

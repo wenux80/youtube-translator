@@ -4,109 +4,125 @@ import { SUPPORTED_LANGUAGES } from '../lib/languages.js';
 import { tts } from '../lib/tts.js';
 import { generateSRT, downloadSRT } from '../lib/srt.js';
 
+let contextInvalidatedNotified = false;
+
+function isExtensionContextValid() {
+  try {
+    return typeof chrome !== 'undefined' && Boolean(chrome.runtime && chrome.runtime.id);
+  } catch (e) {
+    return false;
+  }
+}
+
+function handleContextInvalidated() {
+  if (playerCheckInterval) {
+    clearInterval(playerCheckInterval);
+    playerCheckInterval = null;
+  }
+  if (!contextInvalidatedNotified) {
+    contextInvalidatedNotified = true;
+    showToast('扩展已重载或更新，请刷新当前 YouTube 页面');
+  }
+}
+
+function safeSendMessage(message) {
+  return new Promise((resolve) => {
+    if (!isExtensionContextValid()) {
+      handleContextInvalidated();
+      return resolve({ success: false, error: 'Extension context invalidated', invalidated: true });
+    }
+    try {
+      chrome.runtime.sendMessage(message, (res) => {
+        if (chrome.runtime.lastError) {
+          const msg = chrome.runtime.lastError.message || '';
+          if (msg.includes('Extension context invalidated')) {
+            handleContextInvalidated();
+            return resolve({ success: false, error: msg, invalidated: true });
+          }
+          return resolve({ success: false, error: msg });
+        }
+        resolve(res);
+      });
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (msg.includes('Extension context invalidated')) {
+        handleContextInvalidated();
+      }
+      resolve({ success: false, error: msg, invalidated: msg.includes('Extension context invalidated') });
+    }
+  });
+}
+
 // Database wrappers communicating with background service worker (Extension origin)
 async function dbGetSubtitleRecord(videoId, targetLang, engine) {
-  try {
-    const res = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({
-        type: 'DB_GET_SUBTITLES',
-        payload: { videoId, targetLang, engine }
-      }, resolve);
-    });
-    return res?.success ? res.data : null;
-  } catch (e) {
-    return null;
-  }
+  const res = await safeSendMessage({
+    type: 'DB_GET_SUBTITLES',
+    payload: { videoId, targetLang, engine }
+  });
+  return res?.success ? res.data : null;
 }
 
 async function dbUpdateBatchTranslations(videoId, targetLang, engine, items, meta = {}) {
-  try {
-    const res = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({
-        type: 'DB_UPDATE_BATCH',
-        payload: { videoId, targetLang, engine, items, meta }
-      }, resolve);
-    });
-    return res?.success ? res.data : null;
-  } catch (e) {
-    return null;
-  }
+  const res = await safeSendMessage({
+    type: 'DB_UPDATE_BATCH',
+    payload: { videoId, targetLang, engine, items, meta }
+  });
+  return res?.success ? res.data : null;
 }
 
 async function dbUpdateSingleTranslation(videoId, targetLang, engine, index, newTranslation) {
-  try {
-    const res = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({
-        type: 'DB_UPDATE_SINGLE',
-        payload: { videoId, targetLang, engine, index, newTranslation }
-      }, resolve);
-    });
-    return res?.success ? res.data : null;
-  } catch (e) {
-    return null;
-  }
+  const res = await safeSendMessage({
+    type: 'DB_UPDATE_SINGLE',
+    payload: { videoId, targetLang, engine, index, newTranslation }
+  });
+  return res?.success ? res.data : null;
 }
 
 async function dbDeleteCache(videoId, targetLang, engine) {
-  try {
-    const res = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({
-        type: 'DB_DELETE',
-        payload: { videoId, targetLang, engine }
-      }, resolve);
-    });
-    return res?.success;
-  } catch (e) {
-    return false;
-  }
+  const res = await safeSendMessage({
+    type: 'DB_DELETE',
+    payload: { videoId, targetLang, engine }
+  });
+  return !!res?.success;
 }
 
-async function dbSaveOriginalSubtitles(videoId, videoTitle, items, languageCode = 'en') {
-  try {
-    const res = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({
-        type: 'DB_SAVE_ORIGINAL',
-        payload: { videoId, videoTitle, items, languageCode }
-      }, resolve);
-    });
-    return res?.success;
-  } catch (e) {
-    return false;
-  }
+async function dbSaveOriginalSubtitles(videoId, videoTitle, items, languageCode = 'en', channelName = '', channelId = '') {
+  const res = await safeSendMessage({
+    type: 'DB_SAVE_ORIGINAL',
+    payload: { videoId, videoTitle, items, languageCode, channelName, channelId }
+  });
+  return !!res?.success;
+}
+
+async function dbUpdateChannelMeta(videoId, channelName, channelId = '') {
+  if (!videoId || !channelName) return false;
+  const res = await safeSendMessage({
+    type: 'DB_UPDATE_CHANNEL_META',
+    payload: { videoId, channelName, channelId }
+  });
+  return !!res?.success;
 }
 
 async function dbGetOriginalSubtitles(videoId) {
-  try {
-    const res = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({
-        type: 'DB_GET_ORIGINAL',
-        payload: { videoId }
-      }, resolve);
-    });
-    return res?.success ? res.data : null;
-  } catch (e) {
-    return null;
-  }
+  const res = await safeSendMessage({
+    type: 'DB_GET_ORIGINAL',
+    payload: { videoId }
+  });
+  return res?.success ? res.data : null;
 }
 
 async function dbGetAnySubtitles(videoId) {
-  try {
-    const res = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({
-        type: 'DB_GET_ANY',
-        payload: { videoId }
-      }, resolve);
-    });
-    return res?.success ? res.data : null;
-  } catch (e) {
-    return null;
-  }
+  const res = await safeSendMessage({
+    type: 'DB_GET_ANY',
+    payload: { videoId }
+  });
+  return res?.success ? res.data : null;
 }
 
 // Migrate any legacy cache stored in page-origin IndexedDB over to extension-origin IndexedDB
 async function migrateLegacyPageCache() {
   try {
-    if (typeof indexedDB === 'undefined') return;
+    if (typeof indexedDB === 'undefined' || !isExtensionContextValid()) return;
     const req = indexedDB.open('YouTubeTranslatorDB', 1);
     req.onsuccess = (e) => {
       const db = e.target.result;
@@ -114,16 +130,16 @@ async function migrateLegacyPageCache() {
       const tx = db.transaction('subtitles_cache', 'readonly');
       const store = tx.objectStore('subtitles_cache');
       const getAllReq = store.getAll();
-      getAllReq.onsuccess = () => {
+      getAllReq.onsuccess = async () => {
         const records = getAllReq.result || [];
-        if (records.length > 0) {
+        if (records.length > 0 && isExtensionContextValid()) {
           console.log(`[YouTube Translator] Migrating ${records.length} legacy page-origin records to extension DB...`);
-          records.forEach(rec => {
-            chrome.runtime.sendMessage({
+          for (const rec of records) {
+            await safeSendMessage({
               type: 'DB_SAVE_RECORD',
               payload: { record: rec }
             });
-          });
+          }
           try {
             const clearTx = db.transaction('subtitles_cache', 'readwrite');
             clearTx.objectStore('subtitles_cache').clear();
@@ -139,6 +155,8 @@ async function migrateLegacyPageCache() {
 let settings = null;
 let currentVideoId = null;
 let currentVideoTitle = '';
+let currentChannelName = '';
+let currentChannelId = '';
 let captionTracks = [];
 let subtitles = []; // Array of subtitle items
 let activeIndex = -1;
@@ -148,6 +166,9 @@ let playerCheckInterval = null;
 let pendingLookaheadIndex = null;
 let hasLiveSubtitles = false;
 let lastProcessedTimedtextUrl = '';
+let lastTranslationErrorAt = 0;
+let originalSyncedVideoId = null;
+let hasTriggeredPlayerTimedtext = false;
 
 export async function init() {
   console.log('[YouTube Translator] Initializing content script...');
@@ -158,9 +179,37 @@ export async function init() {
 
   // Listen for settings changes from popup/options
   chrome.storage.onChanged.addListener(async () => {
+    if (!isExtensionContextValid()) {
+      handleContextInvalidated();
+      return;
+    }
+    const prevLang = settings?.targetLang;
+    const prevEngine = settings?.engine;
+    const prevBatchSize = settings?.batchSize;
     settings = await getSettings();
     applyStyles();
     updateUIElements();
+
+    const langSelect = document.getElementById('yt-lang-select');
+    if (langSelect && langSelect.value !== settings.targetLang) {
+      langSelect.value = settings.targetLang;
+    }
+    const engineSelect = document.getElementById('yt-engine-select');
+    if (engineSelect && engineSelect.value !== settings.engine) {
+      engineSelect.value = settings.engine;
+    }
+    const batchNextBtn = document.getElementById('yt-batch-next-btn');
+    if (batchNextBtn && prevBatchSize !== settings.batchSize) {
+      batchNextBtn.textContent = `⚡ 预翻译下 ${settings.batchSize || 10} 条`;
+    }
+
+    if (!settings.enabled) {
+      hideSubtitleBox();
+    } else if (prevLang !== settings.targetLang || prevEngine !== settings.engine) {
+      switchTranslationTarget();
+    } else if (activeIndex !== -1 && subtitles[activeIndex]) {
+      displaySubtitle(subtitles[activeIndex]);
+    }
   });
 
   // Listen for messages from injected main world script (registered in manifest.json)
@@ -170,18 +219,68 @@ export async function init() {
   startPlayerObserver();
 }
 
+// Extract channel name & handle/ID from YouTube watch page DOM as fallback
+function extractChannelFromDom() {
+  const selectors = [
+    'ytd-watch-metadata #owner ytd-channel-name a',
+    '#owner #channel-name a',
+    'ytd-video-owner-renderer #channel-name a',
+    '#upload-info #channel-name a'
+  ];
+  for (const sel of selectors) {
+    const link = document.querySelector(sel);
+    const name = link?.textContent?.trim();
+    if (name) {
+      let chId = '';
+      try {
+        const href = link.getAttribute('href') || '';
+        const match = href.match(/\/channel\/([^/?#]+)|\/(@[^/?#]+)/);
+        if (match) chId = match[1] || match[2] || '';
+      } catch (e) {}
+      return { channelName: name, channelId: chId };
+    }
+  }
+  return { channelName: '', channelId: '' };
+}
+
+function syncChannelInfo(channelName, channelId) {
+  let updated = false;
+  if (channelName && channelName !== currentChannelName) {
+    currentChannelName = channelName;
+    updated = true;
+  }
+  if (channelId && channelId !== currentChannelId) {
+    currentChannelId = channelId;
+    updated = true;
+  }
+  if (!currentChannelName) {
+    const domInfo = extractChannelFromDom();
+    if (domInfo.channelName) {
+      currentChannelName = domInfo.channelName;
+      if (!currentChannelId && domInfo.channelId) currentChannelId = domInfo.channelId;
+      updated = true;
+    }
+  }
+  if (updated && settings?.useCache && currentVideoId && currentChannelName) {
+    dbUpdateChannelMeta(currentVideoId, currentChannelName, currentChannelId).catch(() => {});
+  }
+}
+
 // Handle messages from the main world
 function handleMainWorldMessages(event) {
   if (!event.data || event.data.source !== 'YT_TRANSLATOR_MAIN') return;
 
   if (event.data.type === 'CAPTION_TRACKS_FOUND') {
-    const { videoId, title, tracks } = event.data.payload;
+    const { videoId, title, channelName, channelId, tracks } = event.data.payload;
     if (videoId && (videoId !== currentVideoId || !hasLiveSubtitles || captionTracks.length === 0)) {
       currentVideoId = videoId;
       currentVideoTitle = title || document.title;
+      syncChannelInfo(channelName, channelId);
       captionTracks = tracks || [];
       console.log('[YouTube Translator] Found tracks for video:', videoId, tracks);
       loadSubtitles();
+    } else if (videoId === currentVideoId && (channelName || channelId)) {
+      syncChannelInfo(channelName, channelId);
     }
   } else if (event.data.type === 'TIMEDTEXT_DATA_CAPTURED') {
     const { url, rawText } = event.data.payload;
@@ -216,6 +315,11 @@ let isFetchingTimedtext = false;
 // Start observing the YouTube video player
 function startPlayerObserver() {
   const checkPlayer = () => {
+    if (!isExtensionContextValid()) {
+      handleContextInvalidated();
+      return;
+    }
+
     const video = document.querySelector('video');
     const playerContainer = document.getElementById('movie_player');
     const urlParams = new URLSearchParams(window.location.search);
@@ -224,12 +328,20 @@ function startPlayerObserver() {
     if (videoId && videoId !== currentVideoId) {
       currentVideoId = videoId;
       currentVideoTitle = document.title.replace(' - YouTube', '');
+      currentChannelName = '';
+      currentChannelId = '';
+      syncChannelInfo('', '');
       subtitles = [];
       activeIndex = -1;
       captionTracks = [];
       hasLiveSubtitles = false;
       lastProcessedTimedtextUrl = '';
+      lastTranslationErrorAt = 0;
+      originalSyncedVideoId = null;
+      hasTriggeredPlayerTimedtext = false;
+      lastRenderedSubState = null;
       lastTrackRequestTime = Date.now();
+      renderDrawerList();
       loadSubtitles();
       // Ask injected script for tracks
       window.postMessage({ source: 'YT_TRANSLATOR_CONTENT', type: 'REQUEST_CAPTION_TRACKS' }, '*');
@@ -237,6 +349,10 @@ function startPlayerObserver() {
       // Periodically request tracks if live timedtext not yet loaded (catches late-initializing captions without CC)
       lastTrackRequestTime = Date.now();
       window.postMessage({ source: 'YT_TRANSLATOR_CONTENT', type: 'REQUEST_CAPTION_TRACKS' }, '*');
+    }
+
+    if (videoId && !currentChannelName) {
+      syncChannelInfo('', '');
     }
 
     if (playerContainer && !document.getElementById('yt-translator-floating-bar')) {
@@ -407,22 +523,32 @@ async function fetchAndParseTimedtext(url, trackLang = 'en') {
 
     // 2. Background service worker fallback
     if (!rawText) {
-      const res = await new Promise((resolve) => {
-        chrome.runtime.sendMessage({ type: 'FETCH_TIMEDTEXT', payload: { url } }, resolve);
-      });
+      const res = await safeSendMessage({ type: 'FETCH_TIMEDTEXT', payload: { url } });
       if (res && res.success && res.data) {
         rawText = res.data;
       }
     }
 
     if (!rawText) {
+      // YouTube often returns 200 OK with 0 bytes if track.baseUrl lacks a player POT token.
+      // Ask injected MAIN world script to trigger YouTube's player to request the POT-authenticated timedtext track.
+      if (!hasTriggeredPlayerTimedtext && !hasLiveSubtitles) {
+        hasTriggeredPlayerTimedtext = true;
+        window.postMessage({
+          source: 'YT_TRANSLATOR_CONTENT',
+          type: 'TRIGGER_PLAYER_TIMEDTEXT',
+          payload: { languageCode: trackLang }
+        }, '*');
+        return;
+      }
       console.warn('[YouTube Translator] Unable to fetch timedtext from direct or background');
       return;
     }
 
+    lastProcessedTimedtextUrl = url;
     await parseRawSubtitles(rawText, trackLang);
   } catch (err) {
-    console.error('[YouTube Translator] Error fetching subtitles:', err);
+    console.warn('[YouTube Translator] Error fetching subtitles:', err);
   } finally {
     isFetchingTimedtext = false;
   }
@@ -504,15 +630,26 @@ async function parseRawSubtitles(raw, trackLang = 'en') {
 
     // Save original subtitles to local cache (Original subtitle cache)
     if (settings.useCache && currentVideoId) {
-      dbSaveOriginalSubtitles(currentVideoId, currentVideoTitle, parsedItems, trackLang).catch(() => {});
+      syncChannelInfo('', '');
+      originalSyncedVideoId = currentVideoId;
+      dbSaveOriginalSubtitles(
+        currentVideoId,
+        currentVideoTitle,
+        parsedItems,
+        trackLang,
+        currentChannelName,
+        currentChannelId
+      ).catch(() => {});
     }
 
-    // Preserve any existing translations already in memory
+    // Preserve any existing translations already in memory in O(N) using Map
     if (subtitles && subtitles.length > 0) {
+      const parsedByIdx = new Map();
+      parsedItems.forEach(p => parsedByIdx.set(p.index, p));
       subtitles.forEach(s => {
         if (s.translation && s.status === 'translated') {
-          const target = parsedItems.find(p => p.index === s.index || (Math.abs(p.start - s.start) < 0.5 && p.text === s.text));
-          if (target) {
+          const target = parsedByIdx.get(s.index);
+          if (target && Math.abs(target.start - s.start) < 0.5 && target.text === s.text) {
             target.translation = s.translation;
             target.status = 'translated';
           }
@@ -557,6 +694,55 @@ async function parseRawSubtitles(raw, trackLang = 'en') {
   }
 }
 
+// O(1) amortized lookup during sequential playback with binary search fallback
+function findSubtitleIndexAt(currentTime, endTolerance = 0.3) {
+  const len = subtitles.length;
+  if (len === 0) return -1;
+
+  // Fast path 1: still inside current activeIndex
+  if (activeIndex >= 0 && activeIndex < len) {
+    const cur = subtitles[activeIndex];
+    if (currentTime >= cur.start && currentTime <= cur.end + endTolerance) {
+      return activeIndex;
+    }
+    // Fast path 2: moved to immediate next subtitle
+    if (activeIndex + 1 < len) {
+      const next = subtitles[activeIndex + 1];
+      if (currentTime >= next.start && currentTime <= next.end + endTolerance) {
+        return activeIndex + 1;
+      }
+    }
+  }
+
+  // Binary search for rightmost item with start <= currentTime
+  let lo = 0;
+  let hi = len - 1;
+  let candidate = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (subtitles[mid].start <= currentTime) {
+      candidate = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  if (candidate === -1) return -1;
+  const item = subtitles[candidate];
+  if (currentTime >= item.start && currentTime <= item.end + endTolerance) {
+    return candidate;
+  }
+  // Handle slight overlaps where previous subtitle hasn't ended yet
+  if (candidate > 0) {
+    const prev = subtitles[candidate - 1];
+    if (currentTime >= prev.start && currentTime <= prev.end + endTolerance) {
+      return candidate - 1;
+    }
+  }
+  return -1;
+}
+
 // Main playback loop (timeupdate)
 function onTimeUpdate(video) {
   if (!settings.enabled || subtitles.length === 0) {
@@ -565,9 +751,7 @@ function onTimeUpdate(video) {
   }
 
   const currentTime = video.currentTime;
-  const currentItemIndex = subtitles.findIndex(item =>
-    currentTime >= item.start && currentTime <= (item.end + 0.3)
-  );
+  const currentItemIndex = findSubtitleIndexAt(currentTime, 0.3);
 
   if (currentItemIndex !== -1) {
     const currentItem = subtitles[currentItemIndex];
@@ -616,7 +800,7 @@ function onSeeked(video) {
   tts.stop();
   activeIndex = -1;
   const currentTime = video.currentTime;
-  const currIdx = subtitles.findIndex(item => currentTime >= item.start && currentTime <= (item.end + 0.5));
+  const currIdx = findSubtitleIndexAt(currentTime, 0.5);
   let lookaheadIdx = currIdx;
   if (lookaheadIdx === -1) {
     lookaheadIdx = subtitles.findIndex(item => item.start >= currentTime);
@@ -651,6 +835,11 @@ function onSeeked(video) {
  */
 async function checkLookaheadTranslation(currentIndex, force = false) {
   if (!settings.enabled || subtitles.length === 0 || settings.showTranslation === false) return;
+
+  // Backoff after a failed API call during background playback so bad keys/429s do not loop 4x/sec
+  if (!force && lastTranslationErrorAt && (Date.now() - lastTranslationErrorAt < 5000)) {
+    return;
+  }
 
   if (isTranslating) {
     pendingLookaheadIndex = currentIndex;
@@ -715,42 +904,58 @@ async function checkLookaheadTranslation(currentIndex, force = false) {
   if (pendingItems.length === 0) return;
 
   isTranslating = true;
-  pendingItems.forEach(item => (item.status = 'translating'));
+  pendingItems.forEach(item => {
+    item.status = 'translating';
+    renderDrawerItem(item);
+  });
   renderDrawerProgress();
 
   console.log(`[YouTube Translator] Triggered batch translation: ${pendingItems.length} lines (indices ${pendingItems[0].index}..${pendingItems[pendingItems.length - 1].index}, translated ahead: ${translatedAheadCount})`);
 
+  const reqLang = settings.targetLang;
+  const reqEngine = settings.engine;
+  const reqVideoId = currentVideoId;
+  let batchFailed = false;
+
   try {
-    const response = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({
-        type: 'TRANSLATE_BATCH',
-        payload: {
-          items: pendingItems.map(item => ({
-            index: item.index,
-            text: item.text,
-            start: item.start,
-            dur: item.dur
-          })),
-          targetLang: settings.targetLang,
-          engine: settings.engine,
-          settings
-        }
-      }, resolve);
+    const response = await safeSendMessage({
+      type: 'TRANSLATE_BATCH',
+      payload: {
+        items: pendingItems.map(item => ({
+          index: item.index,
+          text: item.text,
+          start: item.start,
+          dur: item.dur
+        })),
+        targetLang: reqLang,
+        engine: reqEngine,
+        settings
+      }
     });
 
+    // Discard stale response if user switched videos, languages, or engines mid-flight
+    if (reqVideoId !== currentVideoId || reqLang !== settings.targetLang || reqEngine !== settings.engine) {
+      return;
+    }
+
     if (response && response.success && Array.isArray(response.data)) {
+      lastTranslationErrorAt = 0;
+      const subByIdx = new Map();
+      subtitles.forEach(s => subByIdx.set(s.index, s));
+
       response.data.forEach(res => {
-        const target = subtitles.find(s => s.index === res.index);
+        const target = subByIdx.get(res.index);
         if (target) {
           target.translation = res.translation;
           target.status = 'translated';
+          renderDrawerItem(target);
         }
       });
 
       // Save to local cache with FULL item timing and text metadata
       if (settings.useCache && currentVideoId) {
         const itemsToSave = response.data.map(res => {
-          const target = subtitles.find(s => s.index === res.index) || pendingItems.find(p => p.index === res.index);
+          const target = subByIdx.get(res.index) || pendingItems.find(p => p.index === res.index);
           return {
             index: res.index,
             translation: res.translation,
@@ -762,21 +967,28 @@ async function checkLookaheadTranslation(currentIndex, force = false) {
           };
         });
 
+        const meta = {
+          videoTitle: currentVideoTitle,
+          channelName: currentChannelName,
+          channelId: currentChannelId
+        };
+        if (originalSyncedVideoId !== currentVideoId) {
+          meta.baseItems = subtitles.map(s => ({
+            index: s.index,
+            start: s.start,
+            dur: s.dur,
+            end: s.end,
+            text: s.text
+          }));
+          originalSyncedVideoId = currentVideoId;
+        }
+
         await dbUpdateBatchTranslations(
           currentVideoId,
-          settings.targetLang,
-          settings.engine,
+          reqLang,
+          reqEngine,
           itemsToSave,
-          {
-            videoTitle: currentVideoTitle,
-            baseItems: subtitles.map(s => ({
-              index: s.index,
-              start: s.start,
-              dur: s.dur,
-              end: s.end,
-              text: s.text
-            }))
-          }
+          meta
         );
       }
 
@@ -784,15 +996,30 @@ async function checkLookaheadTranslation(currentIndex, force = false) {
       if (activeIndex !== -1 && subtitles[activeIndex]) {
         displaySubtitle(subtitles[activeIndex]);
       }
-
-      renderDrawerList();
     } else {
-      console.warn('[YouTube Translator] Batch translation failed:', response?.error);
-      pendingItems.forEach(item => (item.status = 'pending'));
+      batchFailed = true;
+      lastTranslationErrorAt = Date.now();
+      pendingLookaheadIndex = null;
+      if (!response?.invalidated) {
+        console.warn('[YouTube Translator] Batch translation failed:', response?.error);
+        if (force) {
+          showToast(`翻译失败: ${response?.error || '网络或 API 请求失败'}`);
+        }
+      }
+      pendingItems.forEach(item => {
+        item.status = 'pending';
+        renderDrawerItem(item);
+      });
     }
   } catch (err) {
-    console.error('[YouTube Translator] Batch translation error:', err);
-    pendingItems.forEach(item => (item.status = 'pending'));
+    batchFailed = true;
+    lastTranslationErrorAt = Date.now();
+    pendingLookaheadIndex = null;
+    console.warn('[YouTube Translator] Batch translation error:', err);
+    pendingItems.forEach(item => {
+      item.status = 'pending';
+      renderDrawerItem(item);
+    });
   } finally {
     isTranslating = false;
     renderDrawerProgress();
@@ -801,7 +1028,7 @@ async function checkLookaheadTranslation(currentIndex, force = false) {
       displaySubtitle(subtitles[activeIndex]);
     }
 
-    if (pendingLookaheadIndex !== null) {
+    if (!batchFailed && pendingLookaheadIndex !== null) {
       const nextIdx = pendingLookaheadIndex;
       pendingLookaheadIndex = null;
       checkLookaheadTranslation(nextIdx);
@@ -823,18 +1050,16 @@ export async function retranslateSingle(index) {
   showToast(`正在重新翻译第 ${index + 1} 句...`);
 
   try {
-    const response = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({
-        type: 'RETRANSLATE_SINGLE',
-        payload: {
-          item: { index: item.index, text: item.text },
-          prevText: prevItem?.text || '',
-          nextText: nextItem?.text || '',
-          targetLang: settings.targetLang,
-          engine: settings.engine,
-          settings
-        }
-      }, resolve);
+    const response = await safeSendMessage({
+      type: 'RETRANSLATE_SINGLE',
+      payload: {
+        item: { index: item.index, text: item.text },
+        prevText: prevItem?.text || '',
+        nextText: nextItem?.text || '',
+        targetLang: settings.targetLang,
+        engine: settings.engine,
+        settings
+      }
     });
 
     if (response && response.success && response.translation) {
@@ -858,12 +1083,17 @@ export async function retranslateSingle(index) {
         displaySubtitle(item);
       }
       renderDrawerItem(item);
+      renderDrawerProgress();
     } else {
-      item.status = 'translated';
-      showToast(`重新翻译失败: ${response?.error || '未知错误'}`);
+      item.status = item.translation ? 'translated' : 'pending';
+      renderDrawerItem(item);
+      if (!response?.invalidated) {
+        showToast(`重新翻译失败: ${response?.error || '未知错误'}`);
+      }
     }
   } catch (err) {
-    item.status = 'translated';
+    item.status = item.translation ? 'translated' : 'pending';
+    renderDrawerItem(item);
     showToast(`重新翻译失败: ${err.message}`);
   }
 }
@@ -876,9 +1106,15 @@ function applyStyles() {
 
   root.style.setProperty('--yt-trans-orig-size', `${settings.originalFontSize || 16}px`);
   root.style.setProperty('--yt-trans-trans-size', `${settings.translatedFontSize || 24}px`);
+  root.style.setProperty('--yt-trans-max-width', `${settings.subtitleMaxWidth || 85}%`);
   root.style.setProperty('--yt-trans-font-color', settings.fontColor || '#ffffff');
   root.style.setProperty('--yt-trans-orig-color', settings.originalFontColor || '#d1d5db');
   root.style.setProperty('--yt-trans-bg-color', settings.backgroundColor || 'rgba(0, 0, 0, 0.75)');
+
+  const overlayContainer = document.getElementById('yt-translator-overlay-container');
+  if (overlayContainer) {
+    overlayContainer.classList.toggle('fixed-width', settings.subtitleWidthMode === 'fixed');
+  }
 }
 
 // Seek video to specific timestamp
@@ -1010,6 +1246,53 @@ function toggleNativeCC() {
   }, 100);
 }
 
+// Switch target language or engine cleanly without refetching YouTube timedtext when live subtitles exist
+async function switchTranslationTarget() {
+  lastTranslationErrorAt = 0;
+  pendingLookaheadIndex = null;
+
+  if (!currentVideoId) return;
+
+  if (subtitles.length === 0) {
+    loadSubtitles();
+    return;
+  }
+
+  subtitles.forEach(s => {
+    s.translation = '';
+    s.status = 'pending';
+  });
+
+  if (settings.useCache) {
+    try {
+      const cached = await dbGetSubtitleRecord(currentVideoId, settings.targetLang, settings.engine);
+      if (cached && Array.isArray(cached.items) && cached.items.length > 0) {
+        const cachedMap = new Map();
+        cached.items.forEach(c => {
+          if (c.translation) cachedMap.set(c.index, c.translation);
+        });
+        let hitCount = 0;
+        subtitles.forEach(item => {
+          if (cachedMap.has(item.index)) {
+            item.translation = cachedMap.get(item.index);
+            item.status = 'translated';
+            hitCount++;
+          }
+        });
+        if (hitCount > 0) {
+          showToast(`已加载本地缓存 (${hitCount}/${subtitles.length} 条)`);
+        }
+      }
+    } catch (e) {}
+  }
+
+  if (activeIndex !== -1 && subtitles[activeIndex]) {
+    displaySubtitle(subtitles[activeIndex]);
+  }
+  renderDrawerList();
+  triggerInitialLookahead();
+}
+
 function mountUI(playerContainer) {
   applyStyles();
 
@@ -1019,7 +1302,9 @@ function mountUI(playerContainer) {
     overlayContainer = document.createElement('div');
     overlayContainer.id = 'yt-translator-overlay-container';
     overlayContainer.innerHTML = `
-      <div class="yt-trans-box" style="display: none;" title="点击重听本句，按住可拖拽位置，双击重置位置">
+      <div class="yt-trans-box" style="display: none;" title="点击重听本句，按住可拖拽位置，拖动左右边缘可调宽度，双击重置位置">
+        <div class="yt-trans-resize-handle yt-trans-resize-left" data-side="left" title="左右拖拽调整字幕框宽度（双击恢复默认 85%）"></div>
+        <div class="yt-trans-resize-handle yt-trans-resize-right" data-side="right" title="左右拖拽调整字幕框宽度（双击恢复默认 85%）"></div>
         <button class="yt-trans-corner-close" id="yt-corner-close-btn" title="关闭双语字幕">×</button>
         <div class="yt-trans-hover-actions">
           <button class="yt-trans-action-btn" id="yt-replay-btn" title="跳转至当前句子开头 (重新播放本句)">⏮️ 句首</button>
@@ -1034,15 +1319,18 @@ function mountUI(playerContainer) {
       </div>
     `;
     playerContainer.appendChild(overlayContainer);
+    applyStyles();
 
-    // Make subtitle box draggable with click-to-seek support
+    // Make subtitle box draggable with click-to-seek support and edge-resizable width
     makeDraggable(overlayContainer);
+    makeResizableWidth(overlayContainer);
 
     // Double-click subtitle box to reset to default centered position
     const transBox = overlayContainer.querySelector('.yt-trans-box');
     transBox.addEventListener('dblclick', (e) => {
       e.stopPropagation();
       overlayContainer.classList.remove('custom-positioned');
+      transBox.classList.remove('near-top');
       overlayContainer.style.top = '';
       overlayContainer.style.bottom = '';
       overlayContainer.style.left = '';
@@ -1123,6 +1411,7 @@ function mountUI(playerContainer) {
     floatingBar = document.createElement('div');
     floatingBar.id = 'yt-translator-floating-bar';
     floatingBar.innerHTML = `
+      <span class="yt-bar-drag-handle" id="yt-bar-drag-handle" title="按住拖拽控制条位置，双击恢复右上角">⋮⋮</span>
       <button class="yt-bar-btn ${settings.enabled ? 'active' : ''}" id="yt-toggle-btn" title="${settings.enabled ? '双语字幕已开启 (点击关闭)' : '双语字幕已关闭 (点击开启)'}">
         ${settings.enabled ? '🌐 翻译' : '🌐 开启翻译'}
       </button>
@@ -1190,14 +1479,14 @@ function mountUI(playerContainer) {
       settings.targetLang = e.target.value;
       saveSettings({ targetLang: settings.targetLang });
       showToast(`切换语言: ${e.target.value}`);
-      loadSubtitles();
+      switchTranslationTarget();
     });
 
     floatingBar.querySelector('#yt-engine-select').addEventListener('change', (e) => {
       settings.engine = e.target.value;
       saveSettings({ engine: settings.engine });
       showToast(`切换引擎: ${e.target.value}`);
-      loadSubtitles();
+      switchTranslationTarget();
     });
 
     floatingBar.querySelector('#yt-font-dec').addEventListener('click', () => adjustFontSize(-2));
@@ -1211,6 +1500,15 @@ function mountUI(playerContainer) {
     });
 
     floatingBar.querySelector('#yt-drawer-toggle').addEventListener('click', toggleDrawer);
+
+    // Prevent YouTube player click/double-click/pointer listeners from intercepting floating bar interactions
+    ['pointerdown', 'mousedown', 'click', 'dblclick'].forEach(evtName => {
+      floatingBar.addEventListener(evtName, (e) => {
+        e.stopPropagation();
+      });
+    });
+
+    makeFloatingBarDraggable(floatingBar);
   }
 
   // 3. Create Transcript Drawer attached to document.body
@@ -1263,6 +1561,8 @@ function updateUIElements() {
   }
 }
 
+let lastRenderedSubState = null;
+
 function displaySubtitle(item) {
   if (!settings || !settings.enabled) {
     hideSubtitleBox();
@@ -1283,17 +1583,41 @@ function displaySubtitle(item) {
 
   const origText = (item?.text || '').trim();
   const transText = (item?.translation || (item?.status === 'translating' ? '⏳ 翻译中...' : '')).trim();
+  const nextOrigDisplay = (showOrig && origText) ? 'block' : 'none';
+  const nextTransDisplay = (showTrans && transText) ? 'block' : 'none';
+  const nextBoxDisplay = ((showOrig && origText) || (showTrans && transText)) ? 'inline-block' : 'none';
 
-  origEl.textContent = showOrig ? origText : '';
-  origEl.style.display = (showOrig && origText) ? 'block' : 'none';
+  // Skip redundant DOM writes when playback stays on an unchanged line
+  if (
+    lastRenderedSubState &&
+    lastRenderedSubState.origText === (showOrig ? origText : '') &&
+    lastRenderedSubState.transText === (showTrans ? transText : '') &&
+    lastRenderedSubState.origDisplay === nextOrigDisplay &&
+    lastRenderedSubState.transDisplay === nextTransDisplay &&
+    lastRenderedSubState.boxDisplay === nextBoxDisplay
+  ) {
+    return;
+  }
 
-  transEl.textContent = showTrans ? transText : '';
-  transEl.style.display = (showTrans && transText) ? 'block' : 'none';
+  lastRenderedSubState = {
+    origText: showOrig ? origText : '',
+    transText: showTrans ? transText : '',
+    origDisplay: nextOrigDisplay,
+    transDisplay: nextTransDisplay,
+    boxDisplay: nextBoxDisplay
+  };
 
-  box.style.display = ((showOrig && origText) || (showTrans && transText)) ? 'inline-block' : 'none';
+  origEl.textContent = lastRenderedSubState.origText;
+  origEl.style.display = nextOrigDisplay;
+
+  transEl.textContent = lastRenderedSubState.transText;
+  transEl.style.display = nextTransDisplay;
+
+  box.style.display = nextBoxDisplay;
 }
 
 function hideSubtitleBox() {
+  lastRenderedSubState = null;
   const box = document.querySelector('#yt-translator-overlay-container .yt-trans-box');
   if (box) box.style.display = 'none';
 }
@@ -1308,7 +1632,11 @@ function makeDraggable(element) {
   let hasMoved = false;
 
   element.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.yt-trans-hover-actions') || e.target.closest('.yt-trans-corner-close')) return;
+    if (
+      e.target.closest('.yt-trans-hover-actions') ||
+      e.target.closest('.yt-trans-corner-close') ||
+      e.target.closest('.yt-trans-resize-handle')
+    ) return;
     isDragging = true;
     hasMoved = false;
     startX = e.clientX;
@@ -1353,6 +1681,11 @@ function makeDraggable(element) {
     element.style.transform = 'translateX(-50%)';
     element.style.left = `${centerPercent}%`;
     element.style.top = `${topPercent}%`;
+
+    const transBox = element.querySelector('.yt-trans-box');
+    if (transBox) {
+      transBox.classList.toggle('near-top', topPercent < 18);
+    }
   });
 
   window.addEventListener('mouseup', () => {
@@ -1379,6 +1712,151 @@ function makeDraggable(element) {
 
   document.addEventListener('fullscreenchange', onResize);
   window.addEventListener('resize', onResize);
+}
+
+// Allow adjusting subtitle box width by dragging its left/right edges
+function makeResizableWidth(overlayContainer) {
+  const handles = overlayContainer.querySelectorAll('.yt-trans-resize-handle');
+  if (!handles.length) return;
+
+  let isResizing = false;
+  let side = 'right';
+  let startX = 0;
+  let startWidthPx = 0;
+  let currentPercent = settings?.subtitleMaxWidth || 85;
+
+  handles.forEach(handle => {
+    handle.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      e.preventDefault();
+      const parent = overlayContainer.parentElement;
+      if (!parent) return;
+      const parentWidth = parent.getBoundingClientRect().width;
+      if (parentWidth <= 0) return;
+
+      isResizing = true;
+      side = handle.dataset.side || 'right';
+      startX = e.clientX;
+      startWidthPx = overlayContainer.getBoundingClientRect().width;
+      currentPercent = Math.max(25, Math.min(96, Math.round((startWidthPx / parentWidth) * 100)));
+
+      // Lock initial percentage BEFORE adding .resizing-width so there is zero jump
+      document.documentElement.style.setProperty('--yt-trans-max-width', `${currentPercent}%`);
+      overlayContainer.classList.add('resizing-width');
+    });
+
+    handle.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      settings.subtitleWidthMode = 'auto';
+      settings.subtitleMaxWidth = 85;
+      applyStyles();
+      saveSettings({ subtitleWidthMode: 'auto', subtitleMaxWidth: 85 });
+      showToast('字幕框宽度已恢复自适应 (最大 85%)');
+    });
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!isResizing) return;
+    const parent = overlayContainer.parentElement;
+    if (!parent) return;
+    const parentWidth = parent.getBoundingClientRect().width;
+    if (parentWidth <= 0) return;
+
+    const dx = e.clientX - startX;
+    // Symmetrical adjustment since overlayContainer is center-anchored via translateX(-50%)
+    const deltaWidth = side === 'right' ? dx * 2 : -dx * 2;
+    const newWidthPx = Math.max(parentWidth * 0.25, Math.min(parentWidth * 0.96, startWidthPx + deltaWidth));
+    currentPercent = Math.max(25, Math.min(96, Math.round((newWidthPx / parentWidth) * 100)));
+
+    document.documentElement.style.setProperty('--yt-trans-max-width', `${currentPercent}%`);
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!isResizing) return;
+    isResizing = false;
+    overlayContainer.classList.remove('resizing-width');
+    settings.subtitleWidthMode = 'fixed';
+    settings.subtitleMaxWidth = currentPercent;
+    applyStyles();
+    saveSettings({ subtitleWidthMode: 'fixed', subtitleMaxWidth: currentPercent });
+    showToast(`字幕框宽度已固定为 ${currentPercent}% (双击边缘可恢复自适应)`);
+  });
+}
+
+// Allow dragging the floating control bar via its grip handle so top-area YouTube overlays can never trap it
+function makeFloatingBarDraggable(bar) {
+  const handle = bar.querySelector('#yt-bar-drag-handle');
+  if (!handle) return;
+
+  let isDragging = false;
+  let startX = 0;
+  let startY = 0;
+  let origLeft = 0;
+  let origTop = 0;
+
+  handle.addEventListener('mousedown', (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const parent = bar.parentElement;
+    if (!parent) return;
+    const parentRect = parent.getBoundingClientRect();
+    const barRect = bar.getBoundingClientRect();
+    isDragging = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    origLeft = barRect.left - parentRect.left;
+    origTop = barRect.top - parentRect.top;
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    const parent = bar.parentElement;
+    if (!parent) return;
+    const parentRect = parent.getBoundingClientRect();
+    const barRect = bar.getBoundingClientRect();
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+
+    const maxLeft = Math.max(0, parentRect.width - barRect.width - 8);
+    const maxTop = Math.max(0, parentRect.height - barRect.height - 8);
+    const nextLeft = Math.max(8, Math.min(maxLeft, origLeft + dx));
+    const nextTop = Math.max(8, Math.min(maxTop, origTop + dy));
+
+    bar.style.right = 'auto';
+    bar.style.left = `${nextLeft}px`;
+    bar.style.top = `${nextTop}px`;
+  });
+
+  window.addEventListener('mouseup', () => {
+    isDragging = false;
+  });
+
+  handle.addEventListener('dblclick', (e) => {
+    e.stopPropagation();
+    bar.style.left = '';
+    bar.style.top = '';
+    bar.style.right = '';
+    showToast('控制条已重置为默认右上角');
+  });
+
+  const clampBar = () => {
+    if (!bar.style.left) return;
+    const parent = bar.parentElement;
+    if (!parent) return;
+    const parentRect = parent.getBoundingClientRect();
+    const barRect = bar.getBoundingClientRect();
+    if (parentRect.width === 0 || parentRect.height === 0) return;
+    const curLeft = parseFloat(bar.style.left) || 0;
+    const curTop = parseFloat(bar.style.top) || 0;
+    const maxLeft = Math.max(8, parentRect.width - barRect.width - 8);
+    const maxTop = Math.max(8, parentRect.height - barRect.height - 8);
+    bar.style.left = `${Math.max(8, Math.min(maxLeft, curLeft))}px`;
+    bar.style.top = `${Math.max(8, Math.min(maxTop, curTop))}px`;
+  };
+
+  document.addEventListener('fullscreenchange', clampBar);
+  window.addEventListener('resize', clampBar);
 }
 
 // ---------------- Transcript Drawer (Sidebar) ----------------
@@ -1467,10 +1945,42 @@ function createDrawer() {
   });
 
   drawer.querySelector('#yt-open-cache-mgr').addEventListener('click', () => {
-    chrome.runtime.sendMessage({
+    safeSendMessage({
       type: 'OPEN_OPTIONS_PAGE',
       payload: { tab: 'cache-manager' }
     });
+  });
+
+  // Event delegation for all drawer subtitle items (saves thousands of listeners on long videos)
+  const listContainer = drawer.querySelector('#yt-drawer-items-list');
+  listContainer.addEventListener('click', (e) => {
+    const itemEl = e.target.closest('.yt-drawer-item');
+    if (!itemEl) return;
+    const idx = parseInt(itemEl.dataset.index, 10);
+    const item = subtitles.find(s => s.index === idx);
+    if (!item) return;
+
+    const btn = e.target.closest('button');
+    if (btn) {
+      e.stopPropagation();
+      if (btn.classList.contains('yt-item-copy')) {
+        copySubtitleText(item);
+      } else if (btn.classList.contains('yt-item-retrans')) {
+        retranslateSingle(item.index);
+      } else if (btn.classList.contains('yt-item-speak')) {
+        tts.speak(item.translation || item.text, {
+          videoElement: document.querySelector('video'),
+          ducking: settings.audioDucking,
+          duckingLevel: settings.duckingLevel,
+          rate: settings.ttsRate,
+          volume: settings.ttsVolume,
+          lang: settings.targetLang
+        });
+      }
+      return;
+    }
+
+    seekToVideoTime(item.start);
   });
 }
 
@@ -1500,7 +2010,12 @@ function renderDrawerProgress() {
 function renderDrawerList() {
   renderDrawerProgress();
   const listContainer = document.getElementById('yt-drawer-items-list');
-  if (!listContainer || subtitles.length === 0) return;
+  if (!listContainer) return;
+
+  if (subtitles.length === 0) {
+    listContainer.innerHTML = `<div style="text-align: center; color: #64748b; padding: 20px;">暂无字幕，请播放视频或开启 CC</div>`;
+    return;
+  }
 
   const query = (drawerSearchFilter || '').toLowerCase();
   const itemsToRender = query
@@ -1515,15 +2030,17 @@ function renderDrawerList() {
     return;
   }
 
-  listContainer.innerHTML = '';
+  const fragment = document.createDocumentFragment();
+  const pad = (n) => String(Math.floor(n)).padStart(2, '0');
+
   itemsToRender.forEach(item => {
     const itemEl = document.createElement('div');
     itemEl.className = `yt-drawer-item ${item.index === activeIndex ? 'active' : ''}`;
     itemEl.id = `yt-item-${item.index}`;
+    itemEl.dataset.index = String(item.index);
     itemEl.title = '点击直接跳转到该位置播放视频';
 
     const startSec = (typeof item.start === 'number' && !isNaN(item.start)) ? Math.max(0, item.start) : 0;
-    const pad = (n) => String(Math.floor(n)).padStart(2, '0');
     const timeStr = `${pad(startSec / 60)}:${pad(startSec % 60)}`;
 
     let badgeClass = 'yt-badge-pending';
@@ -1559,40 +2076,11 @@ function renderDrawerList() {
       </div>
     `;
 
-    // Clicking anywhere on the subtitle card jumps to that part of the video!
-    itemEl.addEventListener('click', (e) => {
-      // Don't trigger jump if clicking retranslate or speak buttons
-      if (e.target.closest('.yt-item-actions') || e.target.closest('button')) return;
-      seekToVideoTime(item.start);
-    });
-
-    // Copy single sentence button
-    itemEl.querySelector('.yt-item-copy').addEventListener('click', (e) => {
-      e.stopPropagation();
-      copySubtitleText(item);
-    });
-
-    // Re-translate single sentence button (Optimization #2)
-    itemEl.querySelector('.yt-item-retrans').addEventListener('click', (e) => {
-      e.stopPropagation();
-      retranslateSingle(item.index);
-    });
-
-    // Speak single sentence button
-    itemEl.querySelector('.yt-item-speak').addEventListener('click', (e) => {
-      e.stopPropagation();
-      tts.speak(item.translation || item.text, {
-        videoElement: document.querySelector('video'),
-        ducking: settings.audioDucking,
-        duckingLevel: settings.duckingLevel,
-        rate: settings.ttsRate,
-        volume: settings.ttsVolume,
-        lang: settings.targetLang
-      });
-    });
-
-    listContainer.appendChild(itemEl);
+    fragment.appendChild(itemEl);
   });
+
+  listContainer.innerHTML = '';
+  listContainer.appendChild(fragment);
 }
 
 function renderDrawerItem(item) {
@@ -1604,8 +2092,17 @@ function renderDrawerItem(item) {
 
   if (transEl) transEl.textContent = item.translation || (item.status === 'translating' ? '翻译中...' : '');
   if (badgeEl) {
-    badgeEl.className = `yt-item-badge ${item.status === 'translated' ? 'yt-badge-cached' : 'yt-badge-translating'}`;
-    badgeEl.textContent = item.status === 'translated' ? '已就绪' : '翻译中...';
+    let badgeClass = 'yt-badge-pending';
+    let badgeText = '待翻译';
+    if (item.status === 'translated') {
+      badgeClass = 'yt-badge-cached';
+      badgeText = '已就绪';
+    } else if (item.status === 'translating') {
+      badgeClass = 'yt-badge-translating';
+      badgeText = '翻译中...';
+    }
+    badgeEl.className = `yt-item-badge ${badgeClass}`;
+    badgeEl.textContent = badgeText;
   }
 }
 

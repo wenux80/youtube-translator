@@ -21,8 +21,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   const autoPretranslateCheck = document.getElementById('auto-pretranslate');
   const transFontSizeSlider = document.getElementById('trans-font-size');
   const origFontSizeSlider = document.getElementById('orig-font-size');
+  const subWidthSlider = document.getElementById('sub-width-slider');
   const transFontVal = document.getElementById('trans-font-val');
   const origFontVal = document.getElementById('orig-font-val');
+  const subWidthVal = document.getElementById('sub-width-val');
   const origFontColorInput = document.getElementById('orig-font-color');
   const transFontColorInput = document.getElementById('trans-font-color');
   const showOrigCheck = document.getElementById('show-orig');
@@ -42,6 +44,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   transFontVal.textContent = transFontSizeSlider.value;
   origFontSizeSlider.value = settings.originalFontSize || 16;
   origFontVal.textContent = origFontSizeSlider.value;
+  subWidthSlider.value = settings.subtitleMaxWidth || 85;
+  subWidthVal.textContent = settings.subtitleWidthMode === 'fixed' ? `${subWidthSlider.value}%` : '自适应';
   origFontColorInput.value = settings.originalFontColor || '#d1d5db';
   transFontColorInput.value = settings.fontColor || '#ffffff';
 
@@ -78,23 +82,51 @@ document.addEventListener('DOMContentLoaded', async () => {
     saveSettings({ autoPreTranslate: autoPretranslateCheck.checked });
   });
 
+  // Debounce frequent slider / color picker writes to avoid chrome.storage.sync quota errors
+  const pendingSyncUpdates = {};
+  let syncDebounceTimer = null;
+  function saveSettingsDebounced(partial, delayMs = 250) {
+    Object.assign(pendingSyncUpdates, partial);
+    if (syncDebounceTimer) clearTimeout(syncDebounceTimer);
+    syncDebounceTimer = setTimeout(() => {
+      const payload = { ...pendingSyncUpdates };
+      Object.keys(pendingSyncUpdates).forEach(k => delete pendingSyncUpdates[k]);
+      saveSettings(payload);
+    }, delayMs);
+  }
+
   // Optimization #3: Font size & color adjusters
   transFontSizeSlider.addEventListener('input', () => {
     transFontVal.textContent = transFontSizeSlider.value;
-    saveSettings({ translatedFontSize: parseInt(transFontSizeSlider.value, 10) });
+    saveSettingsDebounced({ translatedFontSize: parseInt(transFontSizeSlider.value, 10) });
   });
 
   origFontSizeSlider.addEventListener('input', () => {
     origFontVal.textContent = origFontSizeSlider.value;
-    saveSettings({ originalFontSize: parseInt(origFontSizeSlider.value, 10) });
+    saveSettingsDebounced({ originalFontSize: parseInt(origFontSizeSlider.value, 10) });
   });
 
+  subWidthSlider.addEventListener('input', () => {
+    const val = parseInt(subWidthSlider.value, 10);
+    subWidthVal.textContent = `${val}%`;
+    saveSettingsDebounced({ subtitleWidthMode: 'fixed', subtitleMaxWidth: val });
+  });
+
+  const subWidthAutoBtn = document.getElementById('sub-width-auto-btn');
+  if (subWidthAutoBtn) {
+    subWidthAutoBtn.addEventListener('click', () => {
+      subWidthSlider.value = 85;
+      subWidthVal.textContent = '自适应';
+      saveSettings({ subtitleWidthMode: 'auto', subtitleMaxWidth: 85 });
+    });
+  }
+
   origFontColorInput.addEventListener('input', () => {
-    saveSettings({ originalFontColor: origFontColorInput.value });
+    saveSettingsDebounced({ originalFontColor: origFontColorInput.value });
   });
 
   transFontColorInput.addEventListener('input', () => {
-    saveSettings({ fontColor: transFontColorInput.value });
+    saveSettingsDebounced({ fontColor: transFontColorInput.value });
   });
 
   showOrigCheck.addEventListener('change', () => {
@@ -117,7 +149,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   ttsRateSlider.addEventListener('input', () => {
     ttsRateVal.textContent = ttsRateSlider.value;
-    saveSettings({ ttsRate: parseFloat(ttsRateSlider.value) });
+    saveSettingsDebounced({ ttsRate: parseFloat(ttsRateSlider.value) });
   });
 
   audioDuckingCheck.addEventListener('change', () => {
