@@ -261,17 +261,17 @@
 }
 
 .yt-item-orig {
-  font-size: 12px;
-  color: #94a3b8;
-  margin-bottom: 4px;
-  line-height: 1.4;
+  font-size: 14px;
+  color: #e2e8f0;
+  margin-bottom: 5px;
+  line-height: 1.5;
 }
 
 .yt-item-trans {
-  font-size: 14px;
-  color: #f8fafc;
-  font-weight: 500;
-  line-height: 1.4;
+  font-size: 15px;
+  color: #ffffff;
+  font-weight: 600;
+  line-height: 1.45;
 }
 
 .yt-item-actions {
@@ -303,4 +303,71 @@
 .yt-item-btn:hover {
   background: rgba(255, 255, 255, 0.1);
   color: #38bdf8;
+}
+
+.yt-item-del-cache:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+}
+
+.yt-drawer-batch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.yt-drawer-select-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #cbd5e1;
+  cursor: pointer;
+  user-select: none;
+}
+
+.yt-drawer-checkbox {
+  width: 14px;
+  height: 14px;
+  accent-color: #38bdf8;
+  cursor: pointer;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.yt-drawer-selected-pill {
+  font-size: 11px;
+  color: #94a3b8;
+  background: rgba(148, 163, 184, 0.12);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.yt-drawer-selected-pill.has-selection {
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.15);
+  font-weight: 600;
+}
+
+.yt-btn-danger {
+  background: rgba(239, 68, 68, 0.16);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #fca5a5;
+}
+
+.yt-btn-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.28);
+  color: #fff;
+}
+
+.yt-btn-sm:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.yt-drawer-item.is-selected {
+  background: rgba(56, 189, 248, 0.1);
+  border-color: rgba(56, 189, 248, 0.45);
 }

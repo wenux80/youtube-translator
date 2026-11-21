@@ -1,5 +1,5 @@
 // Main Content Script for YouTube Translate & Speak
-import { getSettings, saveSettings } from '../lib/storage.js';
+import { getSettings, saveSettings, parseRgbaColor } from '../lib/storage.js';
 import { SUPPORTED_LANGUAGES } from '../lib/languages.js';
 import { tts } from '../lib/tts.js';
 import { generateSRT, downloadSRT } from '../lib/srt.js';
@@ -109,6 +109,15 @@ async function dbDeleteCache(videoId, targetLang, engine) {
   return !!res?.success;
 }
 
+async function dbClearItemTranslations(videoId, targetLang, engine, indices) {
+  if (!videoId || !Array.isArray(indices) || indices.length === 0) return null;
+  const res = await safeSendMessage({
+    type: 'DB_CLEAR_ITEMS',
+    payload: { videoId, targetLang, engine, indices }
+  });
+  return res?.success ? res.data : null;
+}
+
 async function dbSaveOriginalSubtitles(videoId, videoTitle, items, languageCode = 'en', channelName = '', channelId = '') {
   const res = await safeSendMessage({
     type: 'DB_SAVE_ORIGINAL',
@@ -192,8 +201,54 @@ let pendingLookaheadIndex = null;
 let hasLiveSubtitles = false;
 let lastProcessedTimedtextUrl = '';
 let lastTranslationErrorAt = 0;
+let lastBatchCompletedAt = 0;
+let consecutiveTranslationErrors = 0;
+let lookaheadCooldownTimer = null;
 let originalSyncedVideoId = null;
 let hasTriggeredPlayerTimedtext = false;
+let videoSessionToken = 0;
+let activeFetchToken = 0;
+
+function getUrlVideoId() {
+  return new URLSearchParams(window.location.search).get('v');
+}
+
+function getVideoIdFromTimedtextUrl(url) {
+  if (!url) return '';
+  try {
+    return new URL(url, window.location.origin).searchParams.get('v') || '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function resetForVideo(videoId) {
+  videoSessionToken++;
+  currentVideoId = videoId;
+  currentVideoTitle = document.title.replace(' - YouTube', '');
+  currentChannelName = '';
+  currentChannelId = '';
+  tts.stop();
+  hideSubtitleBox();
+  subtitles = [];
+  activeIndex = -1;
+  drawerSelectedIndices.clear();
+  captionTracks = [];
+  hasLiveSubtitles = false;
+  isFetchingTimedtext = false;
+  lastProcessedTimedtextUrl = '';
+  lastTranslationErrorAt = 0;
+  lastBatchCompletedAt = 0;
+  consecutiveTranslationErrors = 0;
+  pendingLookaheadIndex = null;
+  clearLookaheadCooldownTimer();
+  originalSyncedVideoId = null;
+  hasTriggeredPlayerTimedtext = false;
+  lastRenderedSubState = null;
+  lastTrackRequestTime = Date.now();
+  syncChannelInfo('', '');
+  renderDrawerList();
+}
 
 export async function init() {
   console.log('[YouTube Translator] Initializing content script...');
@@ -211,6 +266,8 @@ export async function init() {
     const prevLang = settings?.targetLang;
     const prevEngine = settings?.engine;
     const prevBatchSize = settings?.batchSize;
+    const prevBufferThreshold = settings?.bufferThreshold;
+    const prevAutoPreTranslate = settings?.autoPreTranslate;
     settings = await getSettings();
     applyStyles();
     updateUIElements();
@@ -232,13 +289,58 @@ export async function init() {
       hideSubtitleBox();
     } else if (prevLang !== settings.targetLang || prevEngine !== settings.engine) {
       switchTranslationTarget();
-    } else if (activeIndex !== -1 && subtitles[activeIndex]) {
-      displaySubtitle(subtitles[activeIndex]);
+    } else {
+      if (activeIndex !== -1 && subtitles[activeIndex]) {
+        displaySubtitle(subtitles[activeIndex]);
+      }
+      if (
+        settings.autoPreTranslate
+        && settings.showTranslation !== false
+        && subtitles.length > 0
+        && (
+          prevBufferThreshold !== settings.bufferThreshold
+          || prevBatchSize !== settings.batchSize
+          || prevAutoPreTranslate !== settings.autoPreTranslate
+        )
+      ) {
+        lastTranslationErrorAt = 0;
+        consecutiveTranslationErrors = 0;
+        clearLookaheadCooldownTimer();
+        let triggerIdx = activeIndex;
+        if (triggerIdx === -1) {
+          const video = document.querySelector('video');
+          if (video) {
+            triggerIdx = findSubtitleIndexAt(video.currentTime, 0.25);
+            if (triggerIdx === -1) {
+              triggerIdx = subtitles.findIndex(item => item.start >= video.currentTime);
+            }
+          }
+        }
+        checkLookaheadTranslation(triggerIdx !== -1 ? triggerIdx : 0, false);
+      }
     }
   });
 
   // Listen for messages from injected main world script (registered in manifest.json)
   window.addEventListener('message', handleMainWorldMessages);
+
+  // Listen for cache update broadcasts from background / options cache manager
+  chrome.runtime.onMessage.addListener((message) => {
+    if (!isExtensionContextValid()) {
+      handleContextInvalidated();
+      return;
+    }
+    if (message?.type !== 'CACHE_UPDATED') return;
+    const p = message.payload || {};
+    const affectsCurrent = Boolean(
+      p.clearedAll ||
+      (p.videoId && p.videoId === currentVideoId) ||
+      (Array.isArray(p.keys) && currentVideoId && p.keys.some(k => typeof k === 'string' && k.startsWith(`${currentVideoId}::`)))
+    );
+    if (affectsCurrent) {
+      syncSubtitlesFromCache(false);
+    }
+  });
 
   // Monitor video element and page changes
   startPlayerObserver();
@@ -297,39 +399,59 @@ function handleMainWorldMessages(event) {
 
   if (event.data.type === 'CAPTION_TRACKS_FOUND') {
     const { videoId, title, channelName, channelId, tracks } = event.data.payload;
-    if (videoId && (videoId !== currentVideoId || !hasLiveSubtitles || captionTracks.length === 0)) {
-      currentVideoId = videoId;
-      currentVideoTitle = title || document.title;
+    const activeUrlVid = getUrlVideoId();
+    if (!videoId || (activeUrlVid && videoId !== activeUrlVid)) return;
+
+    const filteredTracks = (tracks || []).filter(t => {
+      const urlVid = getVideoIdFromTimedtextUrl(t?.baseUrl);
+      return !urlVid || urlVid === videoId;
+    });
+    if (filteredTracks.length === 0) return;
+
+    if (videoId !== currentVideoId) {
+      resetForVideo(videoId);
+    }
+
+    if (!hasLiveSubtitles || captionTracks.length === 0) {
+      if (title) currentVideoTitle = title;
       syncChannelInfo(channelName, channelId);
-      captionTracks = tracks || [];
-      console.log('[YouTube Translator] Found tracks for video:', videoId, tracks);
-      loadSubtitles();
+      captionTracks = filteredTracks;
+      console.log('[YouTube Translator] Found tracks for video:', videoId, filteredTracks);
+      loadSubtitles(videoId, videoSessionToken);
     } else if (videoId === currentVideoId && (channelName || channelId)) {
       syncChannelInfo(channelName, channelId);
     }
   } else if (event.data.type === 'TIMEDTEXT_DATA_CAPTURED') {
-    const { url, rawText } = event.data.payload;
+    const { url, rawText, videoId: payloadVid } = event.data.payload;
+    const urlVid = getVideoIdFromTimedtextUrl(url);
+    const activeVid = currentVideoId || getUrlVideoId();
+    if ((urlVid && urlVid !== activeVid) || (payloadVid && payloadVid !== activeVid)) return;
+
     if (rawText && (!hasLiveSubtitles || subtitles.length === 0)) {
       console.log('[YouTube Translator] Captured live timedtext data from network intercept');
       let trackLang = 'en';
       try {
         if (url) {
-          const u = new URL(url);
+          const u = new URL(url, window.location.origin);
           trackLang = u.searchParams.get('lang') || trackLang;
         }
       } catch (e) {}
-      parseRawSubtitles(rawText, trackLang);
+      parseRawSubtitles(rawText, trackLang, activeVid, videoSessionToken);
     }
   } else if (event.data.type === 'TIMEDTEXT_URL_DETECTED') {
-    const { url } = event.data.payload;
+    const { url, videoId: payloadVid } = event.data.payload;
+    const urlVid = getVideoIdFromTimedtextUrl(url);
+    const activeVid = currentVideoId || getUrlVideoId();
+    if ((urlVid && urlVid !== activeVid) || (payloadVid && payloadVid !== activeVid)) return;
+
     if (url && (!hasLiveSubtitles || subtitles.length === 0) && url !== lastProcessedTimedtextUrl) {
       console.log('[YouTube Translator] Detected active timedtext request:', url);
       let trackLang = 'en';
       try {
-        const u = new URL(url);
+        const u = new URL(url, window.location.origin);
         trackLang = u.searchParams.get('lang') || trackLang;
       } catch (e) {}
-      fetchAndParseTimedtext(url, trackLang);
+      fetchAndParseTimedtext(url, trackLang, activeVid, videoSessionToken);
     }
   }
 }
@@ -347,29 +469,15 @@ function startPlayerObserver() {
 
     const video = document.querySelector('video');
     const playerContainer = document.getElementById('movie_player');
-    const urlParams = new URLSearchParams(window.location.search);
-    const videoId = urlParams.get('v');
+    const videoId = getUrlVideoId();
 
     if (videoId && videoId !== currentVideoId) {
-      currentVideoId = videoId;
-      currentVideoTitle = document.title.replace(' - YouTube', '');
-      currentChannelName = '';
-      currentChannelId = '';
-      syncChannelInfo('', '');
-      subtitles = [];
-      activeIndex = -1;
-      captionTracks = [];
-      hasLiveSubtitles = false;
-      lastProcessedTimedtextUrl = '';
-      lastTranslationErrorAt = 0;
-      originalSyncedVideoId = null;
-      hasTriggeredPlayerTimedtext = false;
-      lastRenderedSubState = null;
-      lastTrackRequestTime = Date.now();
-      renderDrawerList();
-      loadSubtitles();
+      resetForVideo(videoId);
+      loadSubtitles(videoId, videoSessionToken);
       // Ask injected script for tracks
       window.postMessage({ source: 'YT_TRANSLATOR_CONTENT', type: 'REQUEST_CAPTION_TRACKS' }, '*');
+    } else if (!videoId && currentVideoId) {
+      resetForVideo(null);
     } else if (videoId && !hasLiveSubtitles && !isFetchingTimedtext && (Date.now() - lastTrackRequestTime > 3000)) {
       // Periodically request tracks if live timedtext not yet loaded (catches late-initializing captions without CC)
       lastTrackRequestTime = Date.now();
@@ -399,6 +507,8 @@ function startPlayerObserver() {
   };
 
   checkPlayer();
+  window.addEventListener('yt-navigate-finish', checkPlayer);
+  window.addEventListener('popstate', checkPlayer);
   playerCheckInterval = setInterval(checkPlayer, 1000);
 }
 
@@ -431,8 +541,8 @@ function triggerInitialLookahead() {
 }
 
 // Load subtitles: ALWAYS prioritize full caption tracks, with local cache as fallback
-async function loadSubtitles() {
-  if (!currentVideoId) return;
+async function loadSubtitles(expectedVideoId = currentVideoId, expectedToken = videoSessionToken) {
+  if (!expectedVideoId || expectedVideoId !== currentVideoId || expectedToken !== videoSessionToken) return;
 
   // 1. If caption tracks are available, fetch the FULL timedtext track from YouTube
   if (captionTracks && captionTracks.length > 0) {
@@ -446,7 +556,7 @@ async function loadSubtitles() {
       if (!timedTextUrl.includes('fmt=')) {
         timedTextUrl += '&fmt=json3';
       }
-      await fetchAndParseTimedtext(timedTextUrl, track.languageCode || 'en');
+      await fetchAndParseTimedtext(timedTextUrl, track.languageCode || 'en', expectedVideoId, expectedToken);
       return;
     }
   }
@@ -466,10 +576,12 @@ async function loadSubtitles() {
 
     try {
       const [cached, origCached, anyCached] = await Promise.all([
-        dbGetSubtitleRecord(currentVideoId, settings.targetLang, settings.engine),
-        dbGetOriginalSubtitles(currentVideoId),
-        dbGetAnySubtitles(currentVideoId)
+        dbGetSubtitleRecord(expectedVideoId, settings.targetLang, settings.engine),
+        dbGetOriginalSubtitles(expectedVideoId),
+        dbGetAnySubtitles(expectedVideoId)
       ]);
+
+      if (expectedVideoId !== currentVideoId || expectedToken !== videoSessionToken) return;
 
       const validRecords = [origCached, anyCached, cached].filter(isValidRecord);
       if (validRecords.length > 0) {
@@ -537,9 +649,14 @@ async function loadSubtitles() {
 }
 
 // Fetch and parse timedtext JSON3 / XML
-async function fetchAndParseTimedtext(url, trackLang = 'en') {
-  if (isFetchingTimedtext) return;
+async function fetchAndParseTimedtext(url, trackLang = 'en', expectedVideoId = currentVideoId, expectedToken = videoSessionToken) {
+  if (!expectedVideoId || expectedVideoId !== currentVideoId || expectedToken !== videoSessionToken) return;
+  const urlVid = getVideoIdFromTimedtextUrl(url);
+  if (urlVid && urlVid !== expectedVideoId) return;
+  if (isFetchingTimedtext && activeFetchToken === expectedToken) return;
+
   isFetchingTimedtext = true;
+  activeFetchToken = expectedToken;
 
   try {
     let rawText = null;
@@ -554,6 +671,8 @@ async function fetchAndParseTimedtext(url, trackLang = 'en') {
       // Direct fetch failed, try background fallback
     }
 
+    if (expectedVideoId !== currentVideoId || expectedToken !== videoSessionToken) return;
+
     // 2. Background service worker fallback
     if (!rawText) {
       const res = await safeSendMessage({ type: 'FETCH_TIMEDTEXT', payload: { url } });
@@ -561,6 +680,8 @@ async function fetchAndParseTimedtext(url, trackLang = 'en') {
         rawText = res.data;
       }
     }
+
+    if (expectedVideoId !== currentVideoId || expectedToken !== videoSessionToken) return;
 
     if (!rawText) {
       // YouTube often returns 200 OK with 0 bytes if track.baseUrl lacks a player POT token.
@@ -579,16 +700,19 @@ async function fetchAndParseTimedtext(url, trackLang = 'en') {
     }
 
     lastProcessedTimedtextUrl = url;
-    await parseRawSubtitles(rawText, trackLang);
+    await parseRawSubtitles(rawText, trackLang, expectedVideoId, expectedToken);
   } catch (err) {
     console.warn('[YouTube Translator] Error fetching subtitles:', err);
   } finally {
-    isFetchingTimedtext = false;
+    if (activeFetchToken === expectedToken) {
+      isFetchingTimedtext = false;
+    }
   }
 }
 
 // Parse JSON3 or XML timedtext into normalized subtitle items and merge cache
-async function parseRawSubtitles(raw, trackLang = 'en') {
+async function parseRawSubtitles(raw, trackLang = 'en', expectedVideoId = currentVideoId, expectedToken = videoSessionToken) {
+  if (!expectedVideoId || expectedVideoId !== currentVideoId || expectedToken !== videoSessionToken) return;
   let parsedItems = [];
 
   // Try JSON3 format
@@ -659,6 +783,7 @@ async function parseRawSubtitles(raw, trackLang = 'en') {
   }
 
   if (parsedItems.length > 0) {
+    if (expectedVideoId !== currentVideoId || expectedToken !== videoSessionToken) return;
     normalizeSubtitleTimings(parsedItems);
     hasLiveSubtitles = true;
 
@@ -695,6 +820,7 @@ async function parseRawSubtitles(raw, trackLang = 'en') {
     if (settings.useCache && currentVideoId) {
       try {
         const cached = await dbGetSubtitleRecord(currentVideoId, settings.targetLang, settings.engine);
+        if (expectedVideoId !== currentVideoId || expectedToken !== videoSessionToken) return;
         if (cached && cached.items && cached.items.length > 0) {
           const cachedMap = new Map();
           cached.items.forEach(c => {
@@ -896,6 +1022,50 @@ function onSeeked(video) {
 
 // ---------------- Optimization #1: Batch Pre-Translation (Buffer Watermark Strategy) ----------------
 
+function clearLookaheadCooldownTimer() {
+  if (lookaheadCooldownTimer) {
+    clearTimeout(lookaheadCooldownTimer);
+    lookaheadCooldownTimer = null;
+  }
+}
+
+function getBatchCooldownMs() {
+  const parsed = parseFloat(settings?.batchCooldownSec);
+  const sec = isNaN(parsed) ? 3 : Math.max(0, Math.min(60, parsed));
+  return sec * 1000;
+}
+
+function getErrorBackoffMs() {
+  const parsed = parseFloat(settings?.errorCooldownSec);
+  const baseSec = isNaN(parsed) ? 5 : Math.max(1, Math.min(120, parsed));
+  const baseMs = baseSec * 1000;
+  if (settings?.errorExponentialBackoff === false || consecutiveTranslationErrors <= 1) {
+    return baseMs;
+  }
+  const multiplier = Math.pow(2, Math.min(consecutiveTranslationErrors - 1, 4));
+  return Math.min(Math.max(baseMs, 60000), baseMs * multiplier);
+}
+
+function scheduleLookaheadRecheck(targetIndex, delayMs) {
+  clearLookaheadCooldownTimer();
+  const expectedVideoId = currentVideoId;
+  const expectedToken = videoSessionToken;
+  lookaheadCooldownTimer = setTimeout(() => {
+    lookaheadCooldownTimer = null;
+    if (expectedVideoId !== currentVideoId || expectedToken !== videoSessionToken) return;
+    if (isTranslating || !settings?.enabled || !settings?.autoPreTranslate || settings?.showTranslation === false) return;
+    const video = document.querySelector('video');
+    let currentIdx = activeIndex;
+    if (currentIdx === -1 && video) {
+      currentIdx = findSubtitleIndexAt(video.currentTime, 0.25);
+      if (currentIdx === -1) {
+        currentIdx = subtitles.findIndex(item => item.start >= video.currentTime);
+      }
+    }
+    checkLookaheadTranslation(currentIdx !== -1 ? currentIdx : targetIndex, false);
+  }, Math.max(50, delayMs));
+}
+
 /**
  * Trigger condition:
  * - When remaining translated buffer ahead of playback is <= BUFFER_THRESHOLD (e.g. 3 lines),
@@ -905,9 +1075,19 @@ function onSeeked(video) {
 async function checkLookaheadTranslation(currentIndex, force = false) {
   if (!settings.enabled || subtitles.length === 0 || settings.showTranslation === false) return;
 
-  // Backoff after a failed API call during background playback so bad keys/429s do not loop 4x/sec
-  if (!force && lastTranslationErrorAt && (Date.now() - lastTranslationErrorAt < 5000)) {
-    return;
+  if (force) {
+    clearLookaheadCooldownTimer();
+  } else {
+    // Backoff after failed API calls (supports configurable base cooldown & exponential backoff)
+    if (lastTranslationErrorAt && (Date.now() - lastTranslationErrorAt < getErrorBackoffMs())) {
+      return;
+    }
+
+    // Inter-batch cooldown after a completed batch to avoid 0ms back-to-back hammering
+    const batchCooldownMs = getBatchCooldownMs();
+    if (batchCooldownMs > 0 && lastBatchCompletedAt && (Date.now() - lastBatchCompletedAt < batchCooldownMs)) {
+      return;
+    }
   }
 
   if (isTranslating) {
@@ -1009,6 +1189,8 @@ async function checkLookaheadTranslation(currentIndex, force = false) {
 
     if (response && response.success && Array.isArray(response.data)) {
       lastTranslationErrorAt = 0;
+      consecutiveTranslationErrors = 0;
+      lastBatchCompletedAt = Date.now();
       const subByIdx = new Map();
       subtitles.forEach(s => subByIdx.set(s.index, s));
 
@@ -1067,6 +1249,7 @@ async function checkLookaheadTranslation(currentIndex, force = false) {
       }
     } else {
       batchFailed = true;
+      consecutiveTranslationErrors++;
       lastTranslationErrorAt = Date.now();
       pendingLookaheadIndex = null;
       if (!response?.invalidated) {
@@ -1081,7 +1264,11 @@ async function checkLookaheadTranslation(currentIndex, force = false) {
       });
     }
   } catch (err) {
+    if (reqVideoId !== currentVideoId || reqLang !== settings.targetLang || reqEngine !== settings.engine) {
+      return;
+    }
     batchFailed = true;
+    consecutiveTranslationErrors++;
     lastTranslationErrorAt = Date.now();
     pendingLookaheadIndex = null;
     console.warn('[YouTube Translator] Batch translation error:', err);
@@ -1097,10 +1284,19 @@ async function checkLookaheadTranslation(currentIndex, force = false) {
       displaySubtitle(subtitles[activeIndex]);
     }
 
-    if (!batchFailed && pendingLookaheadIndex !== null) {
+    if (!batchFailed && pendingLookaheadIndex !== null && settings.autoPreTranslate && settings.showTranslation !== false) {
       const nextIdx = pendingLookaheadIndex;
       pendingLookaheadIndex = null;
-      checkLookaheadTranslation(nextIdx);
+      const cooldownMs = getBatchCooldownMs();
+      const elapsedBatch = lastBatchCompletedAt ? (Date.now() - lastBatchCompletedAt) : cooldownMs;
+      const remainingCooldown = Math.max(0, cooldownMs - elapsedBatch);
+      if (remainingCooldown > 0) {
+        scheduleLookaheadRecheck(nextIdx, remainingCooldown);
+      } else {
+        checkLookaheadTranslation(nextIdx);
+      }
+    } else {
+      pendingLookaheadIndex = null;
     }
   }
 }
@@ -1178,11 +1374,13 @@ function applyStyles() {
   root.style.setProperty('--yt-trans-max-width', `${settings.subtitleMaxWidth || 85}%`);
   root.style.setProperty('--yt-trans-font-color', settings.fontColor || '#ffffff');
   root.style.setProperty('--yt-trans-orig-color', settings.originalFontColor || '#d1d5db');
-  root.style.setProperty('--yt-trans-bg-color', settings.backgroundColor || 'rgba(0, 0, 0, 0.75)');
+  const bgColor = settings.backgroundColor || 'rgba(0, 0, 0, 0.75)';
+  root.style.setProperty('--yt-trans-bg-color', bgColor);
 
   const overlayContainer = document.getElementById('yt-translator-overlay-container');
   if (overlayContainer) {
     overlayContainer.classList.toggle('fixed-width', settings.subtitleWidthMode === 'fixed');
+    overlayContainer.classList.toggle('is-transparent-bg', parseRgbaColor(bgColor).opacity === 0);
   }
 }
 
@@ -1318,7 +1516,10 @@ function toggleNativeCC() {
 // Switch target language or engine cleanly without refetching YouTube timedtext when live subtitles exist
 async function switchTranslationTarget() {
   lastTranslationErrorAt = 0;
+  lastBatchCompletedAt = 0;
+  consecutiveTranslationErrors = 0;
   pendingLookaheadIndex = null;
+  clearLookaheadCooldownTimer();
 
   if (!currentVideoId) return;
 
@@ -1931,6 +2132,140 @@ function makeFloatingBarDraggable(bar) {
 // ---------------- Transcript Drawer (Sidebar) ----------------
 
 let drawerSearchFilter = '';
+let drawerSelectedIndices = new Set();
+
+function isItemTranslated(item) {
+  return Boolean(item && (item.status === 'translated' || (item.translation && item.translation.trim())));
+}
+
+function updateDrawerSelectionUI() {
+  const translatedItems = subtitles.filter(isItemTranslated);
+  const translatedIndexSet = new Set(translatedItems.map(s => s.index));
+  Array.from(drawerSelectedIndices).forEach(idx => {
+    if (!translatedIndexSet.has(idx)) drawerSelectedIndices.delete(idx);
+  });
+
+  const query = (drawerSearchFilter || '').toLowerCase();
+  const visibleTranslated = (query
+    ? translatedItems.filter(s =>
+        (s.text && s.text.toLowerCase().includes(query)) ||
+        (s.translation && s.translation.toLowerCase().includes(query))
+      )
+    : translatedItems);
+
+  const visibleSelectedCount = visibleTranslated.filter(s => drawerSelectedIndices.has(s.index)).length;
+  const totalSelectedCount = drawerSelectedIndices.size;
+
+  const selectAllEl = document.getElementById('yt-drawer-select-all');
+  if (selectAllEl) {
+    selectAllEl.disabled = visibleTranslated.length === 0;
+    selectAllEl.checked = visibleTranslated.length > 0 && visibleSelectedCount === visibleTranslated.length;
+    selectAllEl.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < visibleTranslated.length;
+  }
+
+  const countPill = document.getElementById('yt-drawer-selected-count');
+  if (countPill) {
+    countPill.textContent = `已选 ${totalSelectedCount} 条`;
+    countPill.classList.toggle('has-selection', totalSelectedCount > 0);
+  }
+
+  const batchDelBtn = document.getElementById('yt-drawer-batch-delete-btn');
+  if (batchDelBtn) {
+    batchDelBtn.disabled = totalSelectedCount === 0;
+    batchDelBtn.textContent = totalSelectedCount > 0 ? `🗑️ 删选中译文 (${totalSelectedCount})` : '🗑️ 删选中译文';
+  }
+
+  document.querySelectorAll('#yt-drawer-items-list .yt-drawer-item').forEach(el => {
+    const idx = parseInt(el.dataset.index, 10);
+    const isSel = drawerSelectedIndices.has(idx);
+    el.classList.toggle('is-selected', isSel);
+    const cb = el.querySelector('.yt-drawer-item-checkbox');
+    if (cb) cb.checked = isSel;
+  });
+}
+
+async function deleteDrawerItemTranslations(indices) {
+  const validIndices = Array.from(new Set(
+    (indices || [])
+      .map(n => Number(n))
+      .filter(idx => {
+        const item = subtitles.find(s => s.index === idx);
+        return isItemTranslated(item);
+      })
+  ));
+  if (validIndices.length === 0) return;
+
+  const indexSet = new Set(validIndices);
+  subtitles.forEach(s => {
+    if (indexSet.has(s.index)) {
+      s.translation = '';
+      s.status = 'pending';
+      drawerSelectedIndices.delete(s.index);
+      renderDrawerItem(s);
+    }
+  });
+
+  if (activeIndex !== -1 && subtitles[activeIndex] && indexSet.has(subtitles[activeIndex].index)) {
+    lastRenderedSubState = null;
+    displaySubtitle(subtitles[activeIndex]);
+  }
+
+  renderDrawerProgress();
+  updateDrawerSelectionUI();
+
+  if (currentVideoId) {
+    await dbClearItemTranslations(currentVideoId, settings.targetLang, settings.engine, validIndices);
+  }
+
+  showToast(validIndices.length === 1 ? '已删除该句翻译缓存' : `已删除 ${validIndices.length} 条翻译缓存`);
+}
+
+async function syncSubtitlesFromCache(manual = false) {
+  if (!currentVideoId || subtitles.length === 0 || !settings) {
+    if (manual) showToast('当前没有可刷新的字幕');
+    return;
+  }
+
+  const cached = await dbGetSubtitleRecord(currentVideoId, settings.targetLang, settings.engine);
+  const cachedMap = new Map();
+  if (cached && Array.isArray(cached.items)) {
+    cached.items.forEach(c => {
+      if (isItemTranslated(c)) {
+        cachedMap.set(c.index, c.translation || '');
+      }
+    });
+  }
+
+  let changedCount = 0;
+  subtitles.forEach(item => {
+    if (item.status === 'translating') return;
+    if (cachedMap.has(item.index)) {
+      const nextTrans = cachedMap.get(item.index);
+      if (item.translation !== nextTrans || item.status !== 'translated') {
+        item.translation = nextTrans;
+        item.status = 'translated';
+        changedCount++;
+      }
+    } else if (item.translation || item.status === 'translated') {
+      item.translation = '';
+      item.status = 'pending';
+      drawerSelectedIndices.delete(item.index);
+      changedCount++;
+    }
+  });
+
+  if (changedCount > 0 || manual) {
+    renderDrawerList();
+    if (activeIndex !== -1 && subtitles[activeIndex]) {
+      lastRenderedSubState = null;
+      displaySubtitle(subtitles[activeIndex]);
+    }
+  }
+
+  if (manual) {
+    showToast(changedCount > 0 ? '已从本地缓存刷新字幕列表' : '字幕列表已是最新状态');
+  }
+}
 
 function createDrawer() {
   const drawer = document.createElement('div');
@@ -1955,6 +2290,9 @@ function createDrawer() {
           <button class="yt-btn-sm yt-btn-primary" id="yt-batch-next-btn" title="预处理指定条数 (Optimization #1)">
             ⚡ 预翻译下 ${settings.batchSize || 10} 条
           </button>
+          <button class="yt-btn-sm" id="yt-refresh-subtitles-btn" title="从本地缓存重新同步当前字幕列表">
+            🔄 刷新
+          </button>
           <button class="yt-btn-sm" id="yt-export-srt-btn" title="导出双语 SRT 文件">
             📥 导出SRT
           </button>
@@ -1968,6 +2306,19 @@ function createDrawer() {
       </div>
       <div class="yt-progress-bar-container">
         <div class="yt-progress-bar-fill" id="yt-progress-fill"></div>
+      </div>
+
+      <div class="yt-drawer-batch-row">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <label class="yt-drawer-select-label" title="全选当前已翻译的字幕">
+            <input type="checkbox" id="yt-drawer-select-all" class="yt-drawer-checkbox">
+            <span>全选已译</span>
+          </label>
+          <span class="yt-drawer-selected-pill" id="yt-drawer-selected-count">已选 0 条</span>
+        </div>
+        <button class="yt-btn-sm yt-btn-danger" id="yt-drawer-batch-delete-btn" disabled title="删除勾选句子的翻译缓存（保留原字幕，可重新翻译）">
+          🗑️ 删选中译文
+        </button>
       </div>
     </div>
 
@@ -1991,6 +2342,10 @@ function createDrawer() {
     checkLookaheadTranslation(start, true);
   });
 
+  drawer.querySelector('#yt-refresh-subtitles-btn').addEventListener('click', () => {
+    syncSubtitlesFromCache(true);
+  });
+
   drawer.querySelector('#yt-export-srt-btn').addEventListener('click', () => {
     if (subtitles.length === 0) {
       showToast('当前没有字幕可导出');
@@ -2005,12 +2360,37 @@ function createDrawer() {
   drawer.querySelector('#yt-clear-cache-btn').addEventListener('click', async () => {
     if (!currentVideoId) return;
     await dbDeleteCache(currentVideoId, settings.targetLang, settings.engine);
+    drawerSelectedIndices.clear();
     subtitles.forEach(s => {
       s.translation = '';
       s.status = 'pending';
     });
+    if (activeIndex !== -1 && subtitles[activeIndex]) {
+      lastRenderedSubState = null;
+      displaySubtitle(subtitles[activeIndex]);
+    }
     showToast('已清空当前视频翻译缓存');
     renderDrawerList();
+  });
+
+  drawer.querySelector('#yt-drawer-select-all').addEventListener('change', (e) => {
+    const query = (drawerSearchFilter || '').toLowerCase();
+    const visibleTranslated = subtitles.filter(s =>
+      isItemTranslated(s) &&
+      (!query || (s.text && s.text.toLowerCase().includes(query)) || (s.translation && s.translation.toLowerCase().includes(query)))
+    );
+    if (e.target.checked) {
+      visibleTranslated.forEach(s => drawerSelectedIndices.add(s.index));
+    } else {
+      visibleTranslated.forEach(s => drawerSelectedIndices.delete(s.index));
+    }
+    updateDrawerSelectionUI();
+  });
+
+  drawer.querySelector('#yt-drawer-batch-delete-btn').addEventListener('click', async () => {
+    const indices = Array.from(drawerSelectedIndices);
+    if (indices.length === 0) return;
+    await deleteDrawerItemTranslations(indices);
   });
 
   drawer.querySelector('#yt-open-cache-mgr').addEventListener('click', () => {
@@ -2023,6 +2403,11 @@ function createDrawer() {
   // Event delegation for all drawer subtitle items (saves thousands of listeners on long videos)
   const listContainer = drawer.querySelector('#yt-drawer-items-list');
   listContainer.addEventListener('click', (e) => {
+    if (e.target.classList.contains('yt-drawer-item-checkbox')) {
+      e.stopPropagation();
+      return;
+    }
+
     const itemEl = e.target.closest('.yt-drawer-item');
     if (!itemEl) return;
     const idx = parseInt(itemEl.dataset.index, 10);
@@ -2036,6 +2421,8 @@ function createDrawer() {
         copySubtitleText(item);
       } else if (btn.classList.contains('yt-item-retrans')) {
         retranslateSingle(item.index);
+      } else if (btn.classList.contains('yt-item-del-cache')) {
+        deleteDrawerItemTranslations([item.index]);
       } else if (btn.classList.contains('yt-item-speak')) {
         tts.speak(item.translation || item.text, {
           videoElement: document.querySelector('video'),
@@ -2050,6 +2437,19 @@ function createDrawer() {
     }
 
     seekToVideoTime(item.start);
+  });
+
+  listContainer.addEventListener('change', (e) => {
+    if (!e.target.classList.contains('yt-drawer-item-checkbox')) return;
+    e.stopPropagation();
+    const idx = parseInt(e.target.dataset.index, 10);
+    if (isNaN(idx)) return;
+    if (e.target.checked) {
+      drawerSelectedIndices.add(idx);
+    } else {
+      drawerSelectedIndices.delete(idx);
+    }
+    updateDrawerSelectionUI();
   });
 }
 
@@ -2083,6 +2483,7 @@ function renderDrawerList() {
 
   if (subtitles.length === 0) {
     listContainer.innerHTML = `<div style="text-align: center; color: #64748b; padding: 20px;">暂无字幕，请播放视频或开启 CC</div>`;
+    updateDrawerSelectionUI();
     return;
   }
 
@@ -2096,6 +2497,7 @@ function renderDrawerList() {
 
   if (itemsToRender.length === 0) {
     listContainer.innerHTML = `<div style="text-align: center; color: #64748b; padding: 24px;">未匹配到包含 "${escapeHTML(drawerSearchFilter)}" 的字幕内容</div>`;
+    updateDrawerSelectionUI();
     return;
   }
 
@@ -2103,8 +2505,10 @@ function renderDrawerList() {
   const pad = (n) => String(Math.floor(n)).padStart(2, '0');
 
   itemsToRender.forEach(item => {
+    const translated = isItemTranslated(item);
+    const isSelected = translated && drawerSelectedIndices.has(item.index);
     const itemEl = document.createElement('div');
-    itemEl.className = `yt-drawer-item ${item.index === activeIndex ? 'active' : ''}`;
+    itemEl.className = `yt-drawer-item ${item.index === activeIndex ? 'active' : ''} ${isSelected ? 'is-selected' : ''}`;
     itemEl.id = `yt-item-${item.index}`;
     itemEl.dataset.index = String(item.index);
     itemEl.title = '点击直接跳转到该位置播放视频';
@@ -2125,6 +2529,7 @@ function renderDrawerList() {
     itemEl.innerHTML = `
       <div class="yt-item-header">
         <div class="yt-header-left">
+          <input type="checkbox" class="yt-drawer-checkbox yt-drawer-item-checkbox" data-index="${item.index}" ${translated ? '' : 'disabled'} ${isSelected ? 'checked' : ''} title="${translated ? '选中此句以便批量删除翻译缓存' : '该句尚未翻译'}">
           <span class="yt-item-time" data-time="${startSec}">⏱️ ${timeStr}</span>
           <span class="yt-jump-hint">▶ 点击跳转播放</span>
         </div>
@@ -2139,6 +2544,9 @@ function renderDrawerList() {
         <button class="yt-item-btn yt-item-retrans" data-index="${item.index}" title="重新翻译此句 (Optimization #2)">
           🔄 重译
         </button>
+        <button class="yt-item-btn yt-item-del-cache" data-index="${item.index}" title="删除此句翻译缓存" style="display: ${translated ? 'inline-flex' : 'none'};">
+          🗑️ 删译文
+        </button>
         <button class="yt-item-btn yt-item-speak" data-index="${item.index}" title="朗读">
           🔊 朗读
         </button>
@@ -2150,6 +2558,7 @@ function renderDrawerList() {
 
   listContainer.innerHTML = '';
   listContainer.appendChild(fragment);
+  updateDrawerSelectionUI();
 }
 
 function renderDrawerItem(item) {
@@ -2158,6 +2567,9 @@ function renderDrawerItem(item) {
 
   const transEl = itemEl.querySelector('.yt-item-trans');
   const badgeEl = itemEl.querySelector('.yt-item-badge');
+  const cbEl = itemEl.querySelector('.yt-drawer-item-checkbox');
+  const delBtnEl = itemEl.querySelector('.yt-item-del-cache');
+  const translated = isItemTranslated(item);
 
   if (transEl) transEl.textContent = item.translation || (item.status === 'translating' ? '翻译中...' : '');
   if (badgeEl) {
@@ -2173,6 +2585,19 @@ function renderDrawerItem(item) {
     badgeEl.className = `yt-item-badge ${badgeClass}`;
     badgeEl.textContent = badgeText;
   }
+  if (cbEl) {
+    cbEl.disabled = !translated;
+    cbEl.title = translated ? '选中此句以便批量删除翻译缓存' : '该句尚未翻译';
+    if (!translated && drawerSelectedIndices.has(item.index)) {
+      drawerSelectedIndices.delete(item.index);
+      cbEl.checked = false;
+      itemEl.classList.remove('is-selected');
+    }
+  }
+  if (delBtnEl) {
+    delBtnEl.style.display = translated ? 'inline-flex' : 'none';
+  }
+  updateDrawerSelectionUI();
 }
 
 function highlightDrawerItem(index) {

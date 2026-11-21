@@ -114,6 +114,11 @@
   background-color: rgba(10, 10, 15, 0.88);
 }
 
+#yt-translator-overlay-container.is-transparent-bg .yt-trans-box {
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
 .yt-trans-orig {
   font-size: var(--yt-trans-orig-size);
   color: var(--yt-trans-orig-color);

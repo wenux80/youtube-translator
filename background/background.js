@@ -6,6 +6,8 @@ import {
   saveSubtitleRecord,
   updateBatchTranslations,
   updateSingleTranslation,
+  clearItemTranslations,
+  clearItemTranslationsByKey,
   getAllCachedRecords,
   deleteCache,
   deleteCacheBatch,
@@ -17,6 +19,18 @@ import {
 } from '../lib/db.js';
 
 console.log('[YouTube Translator] Background Service Worker initialized.');
+
+async function broadcastCacheUpdated(payload, excludeTabId = null) {
+  try {
+    const tabs = await chrome.tabs.query({
+      url: ['https://*.youtube.com/*', 'https://youtube.com/*', 'https://*.youtube-nocookie.com/*']
+    });
+    tabs.forEach(tab => {
+      if (!tab?.id || tab.id === excludeTabId) return;
+      chrome.tabs.sendMessage(tab.id, { type: 'CACHE_UPDATED', payload }).catch(() => {});
+    });
+  } catch (e) {}
+}
 
 chrome.runtime.onInstalled.addListener(() => {
   console.log('[YouTube Translator] Installed.');
@@ -85,6 +99,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (type === 'DB_CLEAR_ITEMS') {
+    const { videoId, targetLang, engine, indices } = payload;
+    clearItemTranslations(videoId, targetLang, engine, indices)
+      .then(data => {
+        broadcastCacheUpdated({ videoId, targetLang, engine, indices }, sender?.tab?.id);
+        sendResponse({ success: true, data });
+      })
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (type === 'DB_CLEAR_ITEMS_BY_KEY') {
+    const { key, indices } = payload;
+    clearItemTranslationsByKey(key, indices)
+      .then(data => {
+        broadcastCacheUpdated({
+          key,
+          keys: [key],
+          videoId: data?.videoId || '',
+          indices
+        }, sender?.tab?.id);
+        sendResponse({ success: true, data });
+      })
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
   if (type === 'DB_SAVE_RECORD') {
     const { record } = payload;
     saveSubtitleRecord(record)
@@ -127,7 +168,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (type === 'DB_DELETE') {
     const { videoId, targetLang, engine } = payload;
     deleteCache(videoId, targetLang, engine)
-      .then(data => sendResponse({ success: true, data }))
+      .then(data => {
+        broadcastCacheUpdated({ videoId, targetLang, engine }, sender?.tab?.id);
+        sendResponse({ success: true, data });
+      })
       .catch(err => sendResponse({ success: false, error: err.message }));
     return true;
   }
@@ -135,7 +179,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (type === 'DB_DELETE_BATCH') {
     const { keys } = payload;
     deleteCacheBatch(keys)
-      .then(data => sendResponse({ success: true, data }))
+      .then(data => {
+        broadcastCacheUpdated({ keys }, sender?.tab?.id);
+        sendResponse({ success: true, data });
+      })
       .catch(err => sendResponse({ success: false, error: err.message }));
     return true;
   }
@@ -150,7 +197,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (type === 'DB_CLEAR') {
     clearAllCache()
-      .then(data => sendResponse({ success: true, data }))
+      .then(data => {
+        broadcastCacheUpdated({ clearedAll: true }, sender?.tab?.id);
+        sendResponse({ success: true, data });
+      })
       .catch(err => sendResponse({ success: false, error: err.message }));
     return true;
   }

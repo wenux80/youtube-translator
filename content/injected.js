@@ -26,8 +26,20 @@
     let rawTracks = [];
     let videoTitle = document.title.replace(' - YouTube', '');
 
-    // Helper: validate tracks have baseUrl
-    const hasValidTracks = (arr) => Array.isArray(arr) && arr.length > 0 && arr.some(t => Boolean(t.baseUrl));
+    // Helper: ensure track belongs to the requested videoId (prevents stale tracklist after SPA navigation)
+    const trackMatchesVideo = (track, expectedVid) => {
+      if (!track || typeof track.baseUrl !== 'string' || !track.baseUrl.startsWith('http')) {
+        return false;
+      }
+      try {
+        const v = new URL(track.baseUrl).searchParams.get('v');
+        if (v && v !== expectedVid) return false;
+      } catch (e) {}
+      return true;
+    };
+
+    // Helper: validate tracks have baseUrl belonging to current video
+    const hasValidTracks = (arr) => Array.isArray(arr) && arr.length > 0 && arr.some(t => trackMatchesVideo(t, videoId));
 
     // 1. Try movie_player.getPlayerResponse() (Most accurate for current video)
     if (player && typeof player.getPlayerResponse === 'function') {
@@ -87,27 +99,22 @@
       } catch (e) {}
     }
 
-    // 5. If still no tracks with baseUrl, try player option tracklist and trigger player load
+    // 5. If still no tracks with baseUrl, try player option tracklist ONLY if its URL matches current videoId
     if (rawTracks.length === 0 && player && typeof player.getOption === 'function') {
       try {
         const optTracks = player.getOption('captions', 'tracklist') || player.getOption('captions', 'captionTracks');
         if (Array.isArray(optTracks) && optTracks.length > 0) {
-          if (hasValidTracks(optTracks)) {
-            rawTracks = optTracks;
-          } else if (typeof player.setOption === 'function') {
-            // Tell player to select track so YouTube initiates the signed timedtext request
-            const target = optTracks.find(t => t.languageCode === 'en' || t.languageCode?.startsWith('en')) || optTracks[0];
-            if (target) {
-              player.setOption('captions', 'track', target);
-            }
+          const matchingTracks = optTracks.filter(t => trackMatchesVideo(t, videoId));
+          if (matchingTracks.length > 0) {
+            rawTracks = matchingTracks;
           }
         }
       } catch (e) {}
     }
 
-    // Normalize tracks - only keep tracks that have a genuine signed baseUrl from YouTube
+    // Normalize tracks - only keep tracks that have a genuine signed baseUrl for the current video
     const tracks = rawTracks
-      .filter(t => t && typeof t.baseUrl === 'string' && t.baseUrl.startsWith('http'))
+      .filter(t => trackMatchesVideo(t, videoId))
       .map(t => {
         const langCode = t.languageCode || t.lang || (t.vssId ? t.vssId.replace(/^a?\./, '') : '');
         const kind = t.kind || (t.vssId?.startsWith('a.') ? 'asr' : '');
@@ -218,13 +225,14 @@
   const origOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url) {
     if (typeof url === 'string' && url.includes('/api/timedtext')) {
+      const capturedForVideoId = getCurrentVideoId();
       this.addEventListener('load', function() {
         try {
           if (this.responseText && this.responseText.length > 20) {
             window.postMessage({
               source: 'YT_TRANSLATOR_MAIN',
               type: 'TIMEDTEXT_DATA_CAPTURED',
-              payload: { url, rawText: this.responseText }
+              payload: { url, rawText: this.responseText, videoId: capturedForVideoId }
             }, '*');
             maybeRestoreNativeCc();
           }
@@ -234,7 +242,7 @@
       window.postMessage({
         source: 'YT_TRANSLATOR_MAIN',
         type: 'TIMEDTEXT_URL_DETECTED',
-        payload: { url }
+        payload: { url, videoId: capturedForVideoId }
       }, '*');
     }
     return origOpen.apply(this, arguments);
@@ -243,6 +251,7 @@
   const origFetch = window.fetch;
   window.fetch = async function(input, init) {
     const url = typeof input === 'string' ? input : (input && input.url);
+    const capturedForVideoId = (typeof url === 'string' && url.includes('/api/timedtext')) ? getCurrentVideoId() : null;
     const response = await origFetch.apply(this, arguments);
     if (typeof url === 'string' && url.includes('/api/timedtext')) {
       try {
@@ -252,7 +261,7 @@
             window.postMessage({
               source: 'YT_TRANSLATOR_MAIN',
               type: 'TIMEDTEXT_DATA_CAPTURED',
-              payload: { url, rawText }
+              payload: { url, rawText, videoId: capturedForVideoId }
             }, '*');
             maybeRestoreNativeCc();
           }
@@ -262,7 +271,7 @@
       window.postMessage({
         source: 'YT_TRANSLATOR_MAIN',
         type: 'TIMEDTEXT_URL_DETECTED',
-        payload: { url }
+        payload: { url, videoId: capturedForVideoId }
       }, '*');
     }
     return response;
@@ -347,6 +356,12 @@
   });
 
   // Check on load and on YouTube page changes
+  window.addEventListener('yt-navigate-start', () => {
+    clearTimeout(pollTimer);
+    lastDispatchedVideoId = null;
+    pendingRestoreNativeCcOff = false;
+    clearTimeout(restoreCcTimer);
+  });
   window.addEventListener('yt-navigate-finish', () => pollCaptionTracks(true));
   window.addEventListener('yt-page-data-updated', () => pollCaptionTracks(false));
   window.addEventListener('spfdone', () => pollCaptionTracks(true));

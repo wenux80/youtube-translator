@@ -135,10 +135,28 @@
             <span class="hint">当当前播放位置前方已翻译字幕少于此条数时（默认 10 条），自动触发下一批预翻译。</span>
           </div>
         </div>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label>批间冷却时间 (秒)</label>
+            <input type="number" id="opt-batch-cooldown" class="input-text" min="0" max="60" value="3">
+            <span class="hint">每批自动预翻译完成后至少等待此秒数再发下一批（默认 3 秒，本地网页 AI 建议设 3～5 秒，避免 0 秒追尾导致粘贴失败；设 0 为不冷却）。</span>
+          </div>
+          <div class="form-group flex-1">
+            <label>失败重试初始冷却 (秒)</label>
+            <input type="number" id="opt-error-cooldown" class="input-text" min="1" max="120" value="5">
+            <span class="hint">某批翻译报错后至少等待此秒数才允许自动重试（默认 5 秒）。</span>
+          </div>
+        </div>
         <div class="form-group">
           <label class="check-label">
             <input type="checkbox" id="opt-auto-pretranslate"> 随视频播放自动滑动预处理
           </label>
+        </div>
+        <div class="form-group">
+          <label class="check-label">
+            <input type="checkbox" id="opt-error-exponential-backoff"> 连续失败时自动递增冷却时间（5s → 10s → 20s → … 封顶 60s）
+          </label>
+          <span class="hint">开启后在接口连续报错或超时时自动拉长重试间隔，避免随视频播放每句高频重发；成功一次后自动恢复正常。</span>
         </div>
       </div>
 
@@ -190,8 +208,17 @@
             <input type="color" id="opt-orig-font-color" value="#d1d5db">
           </div>
           <div class="form-group flex-1">
-            <label>背景颜色与透明度</label>
-            <input type="text" id="opt-bg-color" class="input-text" value="rgba(0, 0, 0, 0.75)">
+            <label>背景颜色与透明度 (<span id="lbl-bg-opacity">75</span>%)</label>
+            <div class="bg-control-row">
+              <input type="color" id="opt-bg-color-picker" value="#000000" title="选择字幕框背景颜色">
+              <input type="range" id="opt-bg-opacity" min="0" max="100" value="75" class="range-slider flex-1" title="调整背景透明度 (0% 全透明 ~ 100% 纯色)">
+            </div>
+            <div class="bg-preset-chips">
+              <button type="button" class="btn btn-sm btn-secondary bg-preset-btn" data-hex="#000000" data-opacity="75">默认半透黑</button>
+              <button type="button" class="btn btn-sm btn-secondary bg-preset-btn" data-hex="#000000" data-opacity="92">深邃纯黑</button>
+              <button type="button" class="btn btn-sm btn-secondary bg-preset-btn" data-hex="#0f172a" data-opacity="82">暗夜蓝</button>
+              <button type="button" class="btn btn-sm btn-secondary bg-preset-btn" data-hex="#000000" data-opacity="0">全透明无底</button>
+            </div>
           </div>
         </div>
 

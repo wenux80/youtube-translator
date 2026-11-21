@@ -73,13 +73,21 @@
       </div>
       <div class="form-row" style="align-items: center; justify-content: space-between;">
         <div style="display: flex; align-items: center; gap: 6px;">
-          <label for="orig-font-color" style="margin: 0; font-size: 13px;">原文颜色</label>
+          <label for="orig-font-color" style="margin: 0; font-size: 13px;">原文</label>
           <input type="color" id="orig-font-color" value="#d1d5db" class="input-color">
         </div>
         <div style="display: flex; align-items: center; gap: 6px;">
-          <label for="trans-font-color" style="margin: 0; font-size: 13px;">译文颜色</label>
+          <label for="trans-font-color" style="margin: 0; font-size: 13px;">译文</label>
           <input type="color" id="trans-font-color" value="#ffffff" class="input-color">
         </div>
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <label for="bg-color-picker" style="margin: 0; font-size: 13px;">背景</label>
+          <input type="color" id="bg-color-picker" value="#000000" class="input-color">
+        </div>
+      </div>
+      <div class="form-row">
+        <label for="bg-opacity-slider">背景透明度 (<span id="bg-opacity-val">75</span>%) <button type="button" id="bg-transparent-btn" style="margin-left:4px;font-size:11px;padding:1px 6px;cursor:pointer;border-radius:4px;border:1px solid #475569;background:#1e293b;color:#94a3b8;">无底</button></label>
+        <input type="range" id="bg-opacity-slider" min="0" max="100" value="75" class="range-slider">
       </div>
       <div class="form-check-row">
         <label class="check-label">

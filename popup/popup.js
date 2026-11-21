@@ -1,4 +1,4 @@
-import { getSettings, saveSettings } from '../lib/storage.js';
+import { getSettings, saveSettings, parseRgbaColor, buildRgbaColor } from '../lib/storage.js';
 import { SUPPORTED_LANGUAGES } from '../lib/languages.js';
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -27,6 +27,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   const subWidthVal = document.getElementById('sub-width-val');
   const origFontColorInput = document.getElementById('orig-font-color');
   const transFontColorInput = document.getElementById('trans-font-color');
+  const bgColorPicker = document.getElementById('bg-color-picker');
+  const bgOpacitySlider = document.getElementById('bg-opacity-slider');
+  const bgOpacityVal = document.getElementById('bg-opacity-val');
+  const bgTransparentBtn = document.getElementById('bg-transparent-btn');
   const showOrigCheck = document.getElementById('show-orig');
   const showTransCheck = document.getElementById('show-trans');
   const useCacheCheck = document.getElementById('use-cache');
@@ -48,6 +52,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   subWidthVal.textContent = settings.subtitleWidthMode === 'fixed' ? `${subWidthSlider.value}%` : '自适应';
   origFontColorInput.value = settings.originalFontColor || '#d1d5db';
   transFontColorInput.value = settings.fontColor || '#ffffff';
+  const parsedBg = parseRgbaColor(settings.backgroundColor || 'rgba(0, 0, 0, 0.75)');
+  bgColorPicker.value = parsedBg.hex;
+  bgOpacitySlider.value = parsedBg.opacity;
+  bgOpacityVal.textContent = parsedBg.opacity;
 
   showOrigCheck.checked = !!settings.showOriginal;
   showTransCheck.checked = !!settings.showTranslation;
@@ -128,6 +136,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   transFontColorInput.addEventListener('input', () => {
     saveSettingsDebounced({ fontColor: transFontColorInput.value });
   });
+
+  const saveBackgroundStyle = () => {
+    bgOpacityVal.textContent = bgOpacitySlider.value;
+    saveSettingsDebounced({
+      backgroundColor: buildRgbaColor(bgColorPicker.value, bgOpacitySlider.value)
+    });
+  };
+
+  bgColorPicker.addEventListener('input', saveBackgroundStyle);
+  bgOpacitySlider.addEventListener('input', saveBackgroundStyle);
+  if (bgTransparentBtn) {
+    bgTransparentBtn.addEventListener('click', () => {
+      bgOpacitySlider.value = 0;
+      bgOpacityVal.textContent = '0';
+      saveSettings({
+        backgroundColor: buildRgbaColor(bgColorPicker.value, 0)
+      });
+    });
+  }
 
   showOrigCheck.addEventListener('change', () => {
     saveSettings({ showOriginal: showOrigCheck.checked });

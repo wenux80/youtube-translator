@@ -1,6 +1,6 @@
 // Options page logic
-import { getSettings, saveSettings } from '../lib/storage.js';
-import { getAllCachedRecords, deleteCache, deleteCacheBatch, updateVideoChannelMeta, clearAllCache, makeCacheKey } from '../lib/db.js';
+import { getSettings, saveSettings, parseRgbaColor, buildRgbaColor } from '../lib/storage.js';
+import { getAllCachedRecords, deleteCache, deleteCacheBatch, clearItemTranslationsByKey, updateVideoChannelMeta, clearAllCache, makeCacheKey } from '../lib/db.js';
 import { generateSRT, downloadSRT } from '../lib/srt.js';
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -48,7 +48,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Optimization #1: Batch pre-translate
   document.getElementById('opt-batch-size').value = settings.batchSize || 10;
   document.getElementById('opt-buffer-threshold').value = settings.bufferThreshold ?? 10;
+  document.getElementById('opt-batch-cooldown').value = settings.batchCooldownSec ?? 3;
+  document.getElementById('opt-error-cooldown').value = settings.errorCooldownSec ?? 5;
   document.getElementById('opt-auto-pretranslate').checked = !!settings.autoPreTranslate;
+  document.getElementById('opt-error-exponential-backoff').checked = settings.errorExponentialBackoff !== false;
 
   // Optimization #4: Local cache
   document.getElementById('opt-use-cache').checked = !!settings.useCache;
@@ -62,7 +65,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   const subWidthLbl = document.getElementById('lbl-sub-width');
   const fontColor = document.getElementById('opt-font-color');
   const origColor = document.getElementById('opt-orig-font-color');
-  const bgColor = document.getElementById('opt-bg-color');
+  const bgColorPicker = document.getElementById('opt-bg-color-picker');
+  const bgOpacitySlider = document.getElementById('opt-bg-opacity');
+  const bgOpacityLbl = document.getElementById('lbl-bg-opacity');
 
   let currentWidthMode = settings.subtitleWidthMode === 'fixed' ? 'fixed' : 'auto';
   transSlider.value = settings.translatedFontSize || 24;
@@ -73,23 +78,30 @@ document.addEventListener('DOMContentLoaded', async () => {
   subWidthLbl.textContent = currentWidthMode === 'fixed' ? `${subWidthSlider.value}%` : '自适应';
   fontColor.value = settings.fontColor || '#ffffff';
   origColor.value = settings.originalFontColor || '#d1d5db';
-  bgColor.value = settings.backgroundColor || 'rgba(0, 0, 0, 0.75)';
+
+  const parsedBg = parseRgbaColor(settings.backgroundColor || 'rgba(0, 0, 0, 0.75)');
+  bgColorPicker.value = parsedBg.hex;
+  bgOpacitySlider.value = parsedBg.opacity;
+  bgOpacityLbl.textContent = parsedBg.opacity;
 
   function updatePreview() {
     const box = document.getElementById('preview-box');
     const orig = document.getElementById('preview-orig');
     const trans = document.getElementById('preview-trans');
+    const bgRgba = buildRgbaColor(bgColorPicker.value, bgOpacitySlider.value);
 
     orig.style.fontSize = `${origSlider.value}px`;
     orig.style.color = origColor.value;
     trans.style.fontSize = `${transSlider.value}px`;
     trans.style.color = fontColor.value;
-    box.style.backgroundColor = bgColor.value;
+    box.style.backgroundColor = bgRgba;
+    box.style.boxShadow = Number(bgOpacitySlider.value) === 0 ? 'none' : '';
     box.style.width = currentWidthMode === 'fixed' ? `${subWidthSlider.value}%` : '';
     box.style.maxWidth = `${subWidthSlider.value}%`;
 
     transLbl.textContent = transSlider.value;
     origLbl.textContent = origSlider.value;
+    bgOpacityLbl.textContent = bgOpacitySlider.value;
     subWidthLbl.textContent = currentWidthMode === 'fixed' ? `${subWidthSlider.value}%` : '自适应';
   }
 
@@ -109,11 +121,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   fontColor.addEventListener('input', updatePreview);
   origColor.addEventListener('input', updatePreview);
-  bgColor.addEventListener('input', updatePreview);
+  bgColorPicker.addEventListener('input', updatePreview);
+  bgOpacitySlider.addEventListener('input', updatePreview);
+  document.querySelectorAll('.bg-preset-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      bgColorPicker.value = btn.dataset.hex || '#000000';
+      bgOpacitySlider.value = btn.dataset.opacity ?? 75;
+      updatePreview();
+    });
+  });
   updatePreview();
 
   // Save Settings
   document.getElementById('save-btn').addEventListener('click', async () => {
+    const rawBatchCooldown = parseInt(document.getElementById('opt-batch-cooldown').value, 10);
+    const rawErrorCooldown = parseInt(document.getElementById('opt-error-cooldown').value, 10);
     const newSettings = {
       deepseekApiKey: document.getElementById('deepseek-key').value.trim(),
       deepseekBaseUrl: document.getElementById('deepseek-url').value.trim(),
@@ -137,7 +159,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       batchSize: parseInt(document.getElementById('opt-batch-size').value, 10) || 10,
       bufferThreshold: parseInt(document.getElementById('opt-buffer-threshold').value, 10) || 10,
+      batchCooldownSec: isNaN(rawBatchCooldown) ? 3 : Math.max(0, Math.min(60, rawBatchCooldown)),
+      errorCooldownSec: isNaN(rawErrorCooldown) ? 5 : Math.max(1, Math.min(120, rawErrorCooldown)),
       autoPreTranslate: document.getElementById('opt-auto-pretranslate').checked,
+      errorExponentialBackoff: document.getElementById('opt-error-exponential-backoff').checked,
 
       useCache: document.getElementById('opt-use-cache').checked,
 
@@ -147,7 +172,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       subtitleWidthMode: currentWidthMode,
       fontColor: fontColor.value,
       originalFontColor: origColor.value,
-      backgroundColor: bgColor.value
+      backgroundColor: buildRgbaColor(bgColorPicker.value, bgOpacitySlider.value)
     };
 
     await saveSettings(newSettings);
@@ -159,6 +184,29 @@ document.addEventListener('DOMContentLoaded', async () => {
   let allCachedRecords = [];
   const selectedKeys = new Set();
   const collapsedChannels = new Set();
+  const expandedRecordKeys = new Set();
+  const selectedRecordItems = new Map();
+  const recordItemFilters = new Map();
+
+  function isCacheItemTranslated(item) {
+    return Boolean(item && (item.status === 'translated' || (item.translation && item.translation.trim())));
+  }
+
+  function formatItemTime(sec) {
+    const s = (typeof sec === 'number' && !isNaN(sec)) ? Math.max(0, Math.floor(sec)) : 0;
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const rem = s % 60;
+    const pad = (n) => String(n).padStart(2, '0');
+    return h > 0 ? `${h}:${pad(m)}:${pad(rem)}` : `${pad(m)}:${pad(rem)}`;
+  }
+
+  function getSelectedItemSet(key) {
+    if (!selectedRecordItems.has(key)) {
+      selectedRecordItems.set(key, new Set());
+    }
+    return selectedRecordItems.get(key);
+  }
 
   function getRecordKey(rec) {
     return rec.id || makeCacheKey(rec.videoId, rec.targetLang, rec.engine);
@@ -351,7 +399,8 @@ document.addEventListener('DOMContentLoaded', async () => {
           <td>${countDisplay}</td>
           <td style="font-size: 12px; color: #94a3b8;">${dateStr}</td>
           <td>
-            <div style="display: flex; gap: 6px;">
+            <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+              <button class="btn btn-sm btn-secondary toggle-items-btn">${expandedRecordKeys.has(key) ? '▴ 收起条目' : (isOriginal ? '📋 查看条目' : '📋 展开条目')}</button>
               <button class="btn btn-sm btn-primary export-rec-btn">📥 导出SRT</button>
               <button class="btn btn-sm btn-danger del-rec-btn">🗑️ 删除</button>
             </div>
@@ -364,6 +413,15 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (rowCb.checked) selectedKeys.add(key);
           else selectedKeys.delete(key);
           updateSelectionUI();
+        });
+
+        tr.querySelector('.toggle-items-btn').addEventListener('click', () => {
+          if (expandedRecordKeys.has(key)) {
+            expandedRecordKeys.delete(key);
+          } else {
+            expandedRecordKeys.add(key);
+          }
+          renderCacheGroups();
         });
 
         tr.querySelector('.export-rec-btn').addEventListener('click', () => {
@@ -381,6 +439,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
 
         tbody.appendChild(tr);
+
+        if (expandedRecordKeys.has(key)) {
+          tbody.appendChild(buildExpandedItemsRow(rec, key, isOriginal));
+        }
       });
 
       // Channel checkbox handler
@@ -429,6 +491,221 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateSelectionUI();
   }
 
+  function buildExpandedItemsRow(rec, key, isOriginal) {
+    const itemsArr = Array.isArray(rec.items) ? rec.items : [];
+    const selSet = getSelectedItemSet(key);
+    const validTranslatedSet = new Set(itemsArr.filter(isCacheItemTranslated).map(i => i.index));
+    Array.from(selSet).forEach(idx => {
+      if (!validTranslatedSet.has(idx)) selSet.delete(idx);
+    });
+
+    const expandTr = document.createElement('tr');
+    expandTr.className = 'cache-items-expand-row';
+    const td = document.createElement('td');
+    td.colSpan = 7;
+
+    const panel = document.createElement('div');
+    panel.className = 'cache-items-panel';
+
+    const currentFilter = recordItemFilters.get(key) || '';
+    panel.innerHTML = `
+      <div class="cache-items-toolbar">
+        <div class="cache-items-toolbar-left">
+          ${isOriginal ? '' : `
+            <label class="check-label">
+              <input type="checkbox" class="cache-checkbox cache-items-select-all">
+              <span>全选已译</span>
+            </label>
+          `}
+          <span class="selected-count-pill cache-items-count-pill"></span>
+          ${isOriginal ? '' : `
+            <button class="btn btn-sm btn-danger cache-items-batch-del-btn" disabled>🗑️ 删除选中译文</button>
+          `}
+        </div>
+        <div class="cache-items-toolbar-right">
+          <input type="text" class="input-text cache-items-filter-input" placeholder="🔍 搜索本视频字幕条目..." value="${escapeHTML(currentFilter)}">
+        </div>
+      </div>
+      <div class="cache-items-scroll"></div>
+    `;
+
+    const scrollEl = panel.querySelector('.cache-items-scroll');
+    const selectAllItemsCb = panel.querySelector('.cache-items-select-all');
+    const countPillEl = panel.querySelector('.cache-items-count-pill');
+    const batchDelItemsBtn = panel.querySelector('.cache-items-batch-del-btn');
+    const filterInputEl = panel.querySelector('.cache-items-filter-input');
+
+    const getVisibleItems = () => {
+      const q = (recordItemFilters.get(key) || '').trim().toLowerCase();
+      if (!q) return itemsArr;
+      return itemsArr.filter(it =>
+        (it.text && it.text.toLowerCase().includes(q)) ||
+        (it.translation && it.translation.toLowerCase().includes(q))
+      );
+    };
+
+    const syncItemToolbarUI = () => {
+      const visibleTranslated = getVisibleItems().filter(isCacheItemTranslated);
+      const visibleSelCount = visibleTranslated.filter(it => selSet.has(it.index)).length;
+      const totalTranslated = validTranslatedSet.size;
+      const totalSelected = selSet.size;
+
+      if (selectAllItemsCb) {
+        selectAllItemsCb.disabled = visibleTranslated.length === 0;
+        selectAllItemsCb.checked = visibleTranslated.length > 0 && visibleSelCount === visibleTranslated.length;
+        selectAllItemsCb.indeterminate = visibleSelCount > 0 && visibleSelCount < visibleTranslated.length;
+      }
+
+      if (countPillEl) {
+        countPillEl.textContent = isOriginal
+          ? `共 ${itemsArr.length} 条原版字幕`
+          : `已译 ${totalTranslated} / ${itemsArr.length} 条 · 已选 ${totalSelected} 条`;
+        countPillEl.classList.toggle('has-selection', totalSelected > 0);
+      }
+
+      if (batchDelItemsBtn) {
+        batchDelItemsBtn.disabled = totalSelected === 0;
+        batchDelItemsBtn.textContent = totalSelected > 0
+          ? `🗑️ 删除选中译文 (${totalSelected})`
+          : '🗑️ 删除选中译文';
+      }
+
+      scrollEl.querySelectorAll('.cache-item-row').forEach(row => {
+        const idx = parseInt(row.dataset.index, 10);
+        const isSel = selSet.has(idx);
+        row.classList.toggle('selected', isSel);
+        const cb = row.querySelector('.cache-item-checkbox');
+        if (cb) cb.checked = isSel;
+      });
+    };
+
+    const renderItemList = () => {
+      const visible = getVisibleItems();
+      if (visible.length === 0) {
+        scrollEl.innerHTML = `<div class="cache-items-empty">未找到匹配的字幕条目</div>`;
+        syncItemToolbarUI();
+        return;
+      }
+
+      const frag = document.createDocumentFragment();
+      visible.forEach(item => {
+        const hasTrans = isCacheItemTranslated(item);
+        const isSel = !isOriginal && hasTrans && selSet.has(item.index);
+        const row = document.createElement('div');
+        row.className = `cache-item-row ${(!isOriginal && hasTrans) ? 'is-selectable' : ''} ${isSel ? 'selected' : ''}`;
+        row.dataset.index = String(item.index);
+
+        row.innerHTML = `
+          ${isOriginal ? '' : `
+            <input type="checkbox" class="cache-checkbox cache-item-checkbox" data-index="${item.index}" ${hasTrans ? '' : 'disabled'} ${isSel ? 'checked' : ''} style="margin-top: 4px;" title="${hasTrans ? '选中此条译文' : '该条暂无译文'}">
+          `}
+          <div class="cache-item-body">
+            <div class="cache-item-meta">
+              <span class="cache-item-time">⏱️ ${formatItemTime(item.start)}</span>
+              <span>#${Number(item.index) + 1}</span>
+            </div>
+            <div class="cache-item-orig">${escapeHTML(item.text || '（原文为空）')}</div>
+            ${isOriginal ? '' : `
+              <div class="cache-item-trans ${hasTrans ? '' : 'is-empty'}">${hasTrans ? escapeHTML(item.translation) : '（未翻译）'}</div>
+            `}
+          </div>
+          ${(!isOriginal && hasTrans) ? `
+            <div class="cache-item-actions">
+              <button class="btn btn-sm btn-danger del-single-item-btn" data-index="${item.index}" title="删除此条译文缓存">🗑️ 删译文</button>
+            </div>
+          ` : ''}
+        `;
+        frag.appendChild(row);
+      });
+
+      scrollEl.innerHTML = '';
+      scrollEl.appendChild(frag);
+      syncItemToolbarUI();
+    };
+
+    if (selectAllItemsCb) {
+      selectAllItemsCb.addEventListener('change', () => {
+        const visibleTranslated = getVisibleItems().filter(isCacheItemTranslated);
+        if (selectAllItemsCb.checked) {
+          visibleTranslated.forEach(it => selSet.add(it.index));
+        } else {
+          visibleTranslated.forEach(it => selSet.delete(it.index));
+        }
+        syncItemToolbarUI();
+      });
+    }
+
+    if (batchDelItemsBtn) {
+      batchDelItemsBtn.addEventListener('click', async () => {
+        const indices = Array.from(selSet);
+        if (indices.length === 0) return;
+        if (confirm(`确定删除选中的 ${indices.length} 条字幕译文吗？（原字幕保留，下次播放可重新翻译）`)) {
+          await performClearItemTranslations(key, indices);
+          showToast(`已删除 ${indices.length} 条译文缓存`);
+        }
+      });
+    }
+
+    filterInputEl.addEventListener('input', () => {
+      recordItemFilters.set(key, filterInputEl.value);
+      renderItemList();
+    });
+
+    scrollEl.addEventListener('change', (e) => {
+      if (!e.target.classList.contains('cache-item-checkbox')) return;
+      const idx = parseInt(e.target.dataset.index, 10);
+      if (isNaN(idx)) return;
+      if (e.target.checked) selSet.add(idx);
+      else selSet.delete(idx);
+      syncItemToolbarUI();
+    });
+
+    scrollEl.addEventListener('click', async (e) => {
+      const delBtn = e.target.closest('.del-single-item-btn');
+      if (delBtn) {
+        const idx = parseInt(delBtn.dataset.index, 10);
+        if (isNaN(idx)) return;
+        if (confirm(`确定删除 #${idx + 1} 的翻译缓存吗？`)) {
+          await performClearItemTranslations(key, [idx]);
+          showToast('已删除该条译文缓存');
+        }
+        return;
+      }
+
+      if (isOriginal || e.target.closest('.cache-item-checkbox')) return;
+      const selection = window.getSelection ? window.getSelection().toString().trim() : '';
+      if (selection) return;
+
+      const row = e.target.closest('.cache-item-row.is-selectable');
+      if (!row) return;
+      const idx = parseInt(row.dataset.index, 10);
+      if (isNaN(idx)) return;
+
+      if (selSet.has(idx)) selSet.delete(idx);
+      else selSet.add(idx);
+      syncItemToolbarUI();
+    });
+
+    renderItemList();
+    td.appendChild(panel);
+    expandTr.appendChild(td);
+    return expandTr;
+  }
+
+  async function performClearItemTranslations(key, indices) {
+    if (!key || !indices || indices.length === 0) return;
+    await new Promise(r => chrome.runtime.sendMessage({
+      type: 'DB_CLEAR_ITEMS_BY_KEY',
+      payload: { key, indices }
+    }, r)).catch(() => {});
+    await clearItemTranslationsByKey(key, indices);
+    const selSet = selectedRecordItems.get(key);
+    if (selSet) {
+      indices.forEach(idx => selSet.delete(Number(idx)));
+    }
+    await loadCacheTable();
+  }
+
   async function performBatchDelete(keys) {
     if (!keys || keys.length === 0) return;
     await new Promise(r => chrome.runtime.sendMessage({
@@ -436,7 +713,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       payload: { keys }
     }, r)).catch(() => {});
     await deleteCacheBatch(keys);
-    keys.forEach(k => selectedKeys.delete(k));
+    keys.forEach(k => {
+      selectedKeys.delete(k);
+      expandedRecordKeys.delete(k);
+      selectedRecordItems.delete(k);
+      recordItemFilters.delete(k);
+    });
     await loadCacheTable();
   }
 
@@ -480,10 +762,19 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     allCachedRecords = records;
 
-    // Clean up any stale keys from selection
+    // Clean up any stale keys from selection / expansion state
     const validKeySet = new Set(allCachedRecords.map(getRecordKey));
     Array.from(selectedKeys).forEach(k => {
       if (!validKeySet.has(k)) selectedKeys.delete(k);
+    });
+    Array.from(expandedRecordKeys).forEach(k => {
+      if (!validKeySet.has(k)) expandedRecordKeys.delete(k);
+    });
+    Array.from(selectedRecordItems.keys()).forEach(k => {
+      if (!validKeySet.has(k)) selectedRecordItems.delete(k);
+    });
+    Array.from(recordItemFilters.keys()).forEach(k => {
+      if (!validKeySet.has(k)) recordItemFilters.delete(k);
     });
 
     // Show/hide "resolve unknown channels" button
