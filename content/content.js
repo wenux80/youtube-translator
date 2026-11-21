@@ -14,7 +14,30 @@ function isExtensionContextValid() {
   }
 }
 
+function stopSubtitleSyncLoop() {
+  if (subtitleSyncRafId !== null) {
+    cancelAnimationFrame(subtitleSyncRafId);
+    subtitleSyncRafId = null;
+  }
+}
+
+function startSubtitleSyncLoop(video) {
+  stopSubtitleSyncLoop();
+  if (!video || video.paused || video.ended) return;
+
+  const tick = () => {
+    if (!isExtensionContextValid() || !video || video.paused || video.ended || !video.isConnected) {
+      subtitleSyncRafId = null;
+      return;
+    }
+    onTimeUpdate(video);
+    subtitleSyncRafId = requestAnimationFrame(tick);
+  };
+  subtitleSyncRafId = requestAnimationFrame(tick);
+}
+
 function handleContextInvalidated() {
+  stopSubtitleSyncLoop();
   if (playerCheckInterval) {
     clearInterval(playerCheckInterval);
     playerCheckInterval = null;
@@ -163,6 +186,8 @@ let activeIndex = -1;
 let isTranslating = false;
 let isDrawerOpen = false;
 let playerCheckInterval = null;
+let subtitleSyncRafId = null;
+let lastLookaheadCheckAt = 0;
 let pendingLookaheadIndex = null;
 let hasLiveSubtitles = false;
 let lastProcessedTimedtextUrl = '';
@@ -363,6 +388,13 @@ function startPlayerObserver() {
       video.__yt_translator_bound = true;
       video.addEventListener('timeupdate', () => onTimeUpdate(video));
       video.addEventListener('seeked', () => onSeeked(video));
+      video.addEventListener('play', () => startSubtitleSyncLoop(video));
+      video.addEventListener('playing', () => startSubtitleSyncLoop(video));
+      video.addEventListener('pause', stopSubtitleSyncLoop);
+      video.addEventListener('ended', stopSubtitleSyncLoop);
+      if (!video.paused && !video.ended) {
+        startSubtitleSyncLoop(video);
+      }
     }
   };
 
@@ -485,6 +517,7 @@ async function loadSubtitles() {
           }
         });
         merged.sort((a, b) => a.index - b.index);
+        normalizeSubtitleTimings(merged);
 
         if (!hasLiveSubtitles && merged.length > subtitles.length) {
           subtitles = merged;
@@ -626,6 +659,7 @@ async function parseRawSubtitles(raw, trackLang = 'en') {
   }
 
   if (parsedItems.length > 0) {
+    normalizeSubtitleTimings(parsedItems);
     hasLiveSubtitles = true;
 
     // Save original subtitles to local cache (Original subtitle cache)
@@ -694,23 +728,56 @@ async function parseRawSubtitles(raw, trackLang = 'en') {
   }
 }
 
+// Clamp overlapping cue end times (common in YouTube auto-captions) so old cues never block incoming speech
+function normalizeSubtitleTimings(items) {
+  if (!Array.isArray(items) || items.length === 0) return;
+
+  let needsSort = false;
+  for (let i = 1; i < items.length; i++) {
+    if (items[i].start < items[i - 1].start) {
+      needsSort = true;
+      break;
+    }
+  }
+  if (needsSort) {
+    items.sort((a, b) => a.start - b.start);
+    items.forEach((item, i) => {
+      item.index = i;
+    });
+  }
+
+  for (let i = 0; i < items.length - 1; i++) {
+    const cur = items[i];
+    const next = items[i + 1];
+    if (next.start > cur.start && cur.end > next.start) {
+      cur.end = next.start;
+      cur.dur = Math.max(0.05, cur.end - cur.start);
+    }
+  }
+}
+
 // O(1) amortized lookup during sequential playback with binary search fallback
-function findSubtitleIndexAt(currentTime, endTolerance = 0.3) {
+function findSubtitleIndexAt(currentTime, endTolerance = 0.25) {
   const len = subtitles.length;
   if (len === 0) return -1;
 
-  // Fast path 1: still inside current activeIndex
+  // Fast path: prefer the immediate next cue as soon as its start time arrives;
+  // only hold the current cue through endTolerance when there is a real gap before next.start.
   if (activeIndex >= 0 && activeIndex < len) {
-    const cur = subtitles[activeIndex];
-    if (currentTime >= cur.start && currentTime <= cur.end + endTolerance) {
-      return activeIndex;
-    }
-    // Fast path 2: moved to immediate next subtitle
     if (activeIndex + 1 < len) {
       const next = subtitles[activeIndex + 1];
-      if (currentTime >= next.start && currentTime <= next.end + endTolerance) {
+      const nextLimit = activeIndex + 2 < len
+        ? Math.min(next.end + endTolerance, subtitles[activeIndex + 2].start)
+        : next.end + endTolerance;
+      if (currentTime >= next.start && currentTime < nextLimit) {
         return activeIndex + 1;
       }
+    }
+    const cur = subtitles[activeIndex];
+    const nextStart = activeIndex + 1 < len ? subtitles[activeIndex + 1].start : Infinity;
+    const effectiveEnd = Math.min(cur.end + endTolerance, nextStart);
+    if (currentTime >= cur.start && currentTime < effectiveEnd) {
+      return activeIndex;
     }
   }
 
@@ -733,29 +800,30 @@ function findSubtitleIndexAt(currentTime, endTolerance = 0.3) {
   if (currentTime >= item.start && currentTime <= item.end + endTolerance) {
     return candidate;
   }
-  // Handle slight overlaps where previous subtitle hasn't ended yet
+  // Fallback: if candidate already ended, check whether previous cue spans this gap
   if (candidate > 0) {
     const prev = subtitles[candidate - 1];
-    if (currentTime >= prev.start && currentTime <= prev.end + endTolerance) {
+    if (currentTime >= prev.start && currentTime <= prev.end) {
       return candidate - 1;
     }
   }
   return -1;
 }
 
-// Main playback loop (timeupdate)
+// Main playback sync loop (driven by rAF while playing + timeupdate fallback)
 function onTimeUpdate(video) {
-  if (!settings.enabled || subtitles.length === 0) {
+  if (!settings || !settings.enabled || subtitles.length === 0) {
     hideSubtitleBox();
     return;
   }
 
   const currentTime = video.currentTime;
-  const currentItemIndex = findSubtitleIndexAt(currentTime, 0.3);
+  const currentItemIndex = findSubtitleIndexAt(currentTime, 0.25);
 
   if (currentItemIndex !== -1) {
     const currentItem = subtitles[currentItemIndex];
-    if (currentItemIndex !== activeIndex) {
+    const indexChanged = currentItemIndex !== activeIndex;
+    if (indexChanged) {
       activeIndex = currentItemIndex;
       displaySubtitle(currentItem);
 
@@ -778,18 +846,19 @@ function onTimeUpdate(video) {
       displaySubtitle(currentItem);
     }
 
-    // Optimization #1: Check and pre-translate upcoming batch
+    // Optimization #1: Check and pre-translate upcoming batch (throttled during 60fps rAF sync)
     if (settings.autoPreTranslate && settings.showTranslation !== false) {
-      checkLookaheadTranslation(currentItemIndex);
+      const now = Date.now();
+      if (indexChanged || now - lastLookaheadCheckAt >= 250) {
+        lastLookaheadCheckAt = now;
+        checkLookaheadTranslation(currentItemIndex);
+      }
     }
   } else {
     // If between subtitles
     if (activeIndex !== -1) {
-      const prevItem = subtitles[activeIndex];
-      if (currentTime > (prevItem.end + 0.5) || currentTime < prevItem.start) {
-        activeIndex = -1;
-        hideSubtitleBox();
-      }
+      activeIndex = -1;
+      hideSubtitleBox();
     }
   }
 }
